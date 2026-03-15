@@ -1,6 +1,8 @@
-.PHONY: build build-hnet build-hnetd test vet fmt tidy verify clean
+.PHONY: build build-hnet build-hnetd install uninstall test vet fmt tidy verify clean
 
 GO ?= go
+BIN_DIR ?= $(HOME)/.local/bin
+INSTALL ?= install
 
 build: build-hnet build-hnetd
 
@@ -9,6 +11,14 @@ build-hnet:
 
 build-hnetd:
 	$(GO) build -o ./hnetd ./cmd/hnetd
+
+install: build
+	mkdir -p "$(BIN_DIR)"
+	$(INSTALL) -m 0755 ./hnet "$(BIN_DIR)/hnet"
+	$(INSTALL) -m 0755 ./hnetd "$(BIN_DIR)/hnetd"
+
+uninstall:
+	rm -f "$(BIN_DIR)/hnet" "$(BIN_DIR)/hnetd"
 
 test:
 	$(GO) test ./...

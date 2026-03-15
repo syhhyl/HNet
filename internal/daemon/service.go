@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -21,8 +24,9 @@ import (
 )
 
 const (
-	version        = "phase1"
-	proxyGroupName = "PROXY"
+	version          = "v0.0.1"
+	proxyGroupName   = "PROXY"
+	proxyLoadTimeout = 15 * time.Second
 )
 
 type Service struct {
@@ -69,11 +73,9 @@ func (s *Service) Serve(ctx context.Context) error {
 	}
 	defer os.Remove(s.paths.PIDFile)
 
-	if err := os.RemoveAll(s.paths.SocketPath); err != nil {
+	if err := os.Remove(s.paths.SocketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-
-	s.restoreRuntime()
 
 	listener, err := net.Listen("unix", s.paths.SocketPath)
 	if err != nil {
@@ -90,12 +92,16 @@ func (s *Service) Serve(ctx context.Context) error {
 		errCh <- server.Serve(listener)
 	}()
 
+	s.restoreRuntime()
+
 	select {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
-		return s.supervisor.Stop()
+		stopErr := s.supervisor.Stop()
+		proxyErr := s.shutdownSystemProxy()
+		return errors.Join(stopErr, proxyErr)
 	case err := <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
@@ -137,12 +143,19 @@ func (s *Service) restoreRuntime() {
 			return
 		}
 	} else {
+		if s.state.SystemProxyEnabled {
+			if err := s.disableSystemProxyLocked(); err != nil {
+				s.recordErrorLocked(fmt.Sprintf("restore system proxy: %v", err))
+				return
+			}
+			_ = config.SaveState(s.paths.StatePath, s.state)
+		}
 		return
 	}
 
 	binaryPath, err := s.supervisor.Apply(s.state.ControllerPort, s.state.Secret)
 	if err != nil {
-		s.recordErrorLocked(err.Error())
+		s.recordErrorLocked(s.recoverRuntimeFailureLocked(err).Error())
 		return
 	}
 
@@ -150,7 +163,7 @@ func (s *Service) restoreRuntime() {
 	s.state.LastError = ""
 	if s.state.SystemProxyEnabled {
 		if err := macos.SetMixedProxy(s.state.MixedPort); err != nil {
-			s.recordErrorLocked(err.Error())
+			s.recordErrorLocked(s.recoverRuntimeFailureLocked(err).Error())
 			return
 		}
 	}
@@ -161,6 +174,8 @@ func (s *Service) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/subscription", s.handleSubscription)
+	mux.HandleFunc("/v1/subscription/delete", s.handleSubscriptionDelete)
+	mux.HandleFunc("/v1/subscription/select", s.handleSubscriptionSelect)
 	mux.HandleFunc("/v1/proxy/test", s.handleProxyTest)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
 	mux.HandleFunc("/v1/system-proxy", s.handleSystemProxy)
@@ -188,6 +203,46 @@ func (s *Service) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 
 	status, err := s.importSubscription(request.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Service) handleSubscriptionSelect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request api.SelectSubscriptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	status, err := s.selectSubscription(request.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Service) handleSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request api.DeleteSubscriptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	status, err := s.deleteSubscription(request.URL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -261,28 +316,129 @@ func (s *Service) importSubscription(rawURL string) (api.StatusResponse, error) 
 		return api.StatusResponse{}, err
 	}
 
-	s.mu.Lock()
-	updatedState, _, err := ensureRuntimePorts(s.state, s.supervisor.Running())
+	return s.applySubscription(normalizedURL, true)
+}
+
+func (s *Service) selectSubscription(rawURL string) (api.StatusResponse, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
 	if err != nil {
-		s.recordErrorLocked(err.Error())
+		return api.StatusResponse{}, err
+	}
+
+	s.mu.Lock()
+	if s.state.SubscriptionURL == normalizedURL {
+		s.mu.Unlock()
+		return s.status(), nil
+	}
+	if !containsSelectedSubscription(s.state.Subscriptions, normalizedURL) {
+		s.mu.Unlock()
+		return api.StatusResponse{}, errors.New("subscription not found")
+	}
+	s.mu.Unlock()
+
+	return s.applySubscription(normalizedURL, false)
+}
+
+func (s *Service) deleteSubscription(rawURL string) (api.StatusResponse, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
+	if err != nil {
+		return api.StatusResponse{}, err
+	}
+
+	s.mu.Lock()
+	removed, deletedActive, nextURL := s.state.DeleteSubscription(normalizedURL)
+	if !removed {
+		s.mu.Unlock()
+		return api.StatusResponse{}, errors.New("subscription not found")
+	}
+	if err := s.clearProviderCacheLocked(normalizedURL); err != nil {
 		s.mu.Unlock()
 		return api.StatusResponse{}, err
 	}
-	s.state = updatedState
-	s.state.SubscriptionURL = normalizedURL
 	s.proxyMetrics = make(map[string]proxyMetric)
+
+	if !deletedActive {
+		if err := config.SaveState(s.paths.StatePath, s.state); err != nil {
+			s.mu.Unlock()
+			return api.StatusResponse{}, fmt.Errorf("save state: %w", err)
+		}
+		s.mu.Unlock()
+		return s.status(), nil
+	}
+
+	if nextURL == "" {
+		if err := s.removeManagedRuntimeLocked(); err != nil {
+			s.mu.Unlock()
+			return api.StatusResponse{}, err
+		}
+		if err := config.SaveState(s.paths.StatePath, s.state); err != nil {
+			s.mu.Unlock()
+			return api.StatusResponse{}, fmt.Errorf("save state: %w", err)
+		}
+		s.mu.Unlock()
+		return s.status(), nil
+	}
+
+	if err := s.clearProviderCacheLocked(nextURL); err != nil {
+		s.mu.Unlock()
+		return api.StatusResponse{}, err
+	}
+
+	if err := s.applyCurrentSubscriptionLocked(); err != nil {
+		s.mu.Unlock()
+		return api.StatusResponse{}, err
+	}
+	s.mu.Unlock()
+
+	if err := s.waitForManagedProxies(); err != nil {
+		return api.StatusResponse{}, err
+	}
+	return s.status(), nil
+}
+
+func (s *Service) applySubscription(normalizedURL string, addToList bool) (api.StatusResponse, error) {
+	s.mu.Lock()
+	if addToList {
+		s.state.UpsertSubscription(normalizedURL)
+	} else if !s.state.SelectSubscription(normalizedURL) {
+		s.mu.Unlock()
+		return api.StatusResponse{}, errors.New("subscription not found")
+	}
+	if err := s.clearProviderCacheLocked(normalizedURL); err != nil {
+		s.mu.Unlock()
+		return api.StatusResponse{}, err
+	}
+	s.proxyMetrics = make(map[string]proxyMetric)
+	err := s.applyCurrentSubscriptionLocked()
+	s.mu.Unlock()
+	if err != nil {
+		return api.StatusResponse{}, err
+	}
+
+	if err := s.waitForManagedProxies(); err != nil {
+		return api.StatusResponse{}, err
+	}
+	return s.status(), nil
+}
+
+func (s *Service) applyCurrentSubscriptionLocked() error {
+	updatedState, _, err := ensureRuntimePorts(s.state, s.supervisor.Running())
+	if err != nil {
+		s.recordErrorLocked(err.Error())
+		return err
+	}
+	s.state = updatedState
 
 	if err := s.writeManagedConfigLocked(); err != nil {
 		s.recordErrorLocked(err.Error())
-		s.mu.Unlock()
-		return api.StatusResponse{}, err
+		return err
 	}
 
 	binaryPath, err := s.supervisor.Apply(s.state.ControllerPort, s.state.Secret)
 	if err != nil {
+		err = s.recoverRuntimeFailureLocked(err)
 		s.recordErrorLocked(err.Error())
-		s.mu.Unlock()
-		return api.StatusResponse{}, err
+		return err
 	}
 
 	s.state.MihomoPath = binaryPath
@@ -290,18 +446,15 @@ func (s *Service) importSubscription(rawURL string) (api.StatusResponse, error) 
 	s.state.LastError = ""
 	if s.state.SystemProxyEnabled {
 		if err := macos.SetMixedProxy(s.state.MixedPort); err != nil {
+			err = s.recoverRuntimeFailureLocked(err)
 			s.recordErrorLocked(err.Error())
-			s.mu.Unlock()
-			return api.StatusResponse{}, err
+			return err
 		}
 	}
 	if err := config.SaveState(s.paths.StatePath, s.state); err != nil {
-		s.mu.Unlock()
-		return api.StatusResponse{}, fmt.Errorf("save state: %w", err)
+		return fmt.Errorf("save state: %w", err)
 	}
-	s.mu.Unlock()
-
-	return s.status(), nil
+	return nil
 }
 
 func (s *Service) selectProxy(name string) (api.StatusResponse, error) {
@@ -379,21 +532,15 @@ func (s *Service) setSystemProxy(enabled bool) (api.StatusResponse, error) {
 	s.mu.Lock()
 
 	if enabled {
-		if !s.supervisor.Running() {
-			s.mu.Unlock()
-			return api.StatusResponse{}, errors.New("mihomo is not running")
-		}
-		if err := macos.SetMixedProxy(s.state.MixedPort); err != nil {
+		if err := s.enableSystemProxyLocked(); err != nil {
 			s.mu.Unlock()
 			return api.StatusResponse{}, err
 		}
-		s.state.SystemProxyEnabled = true
 	} else {
-		if err := macos.DisableSystemProxy(); err != nil {
+		if err := s.disableSystemProxyLocked(); err != nil {
 			s.mu.Unlock()
 			return api.StatusResponse{}, err
 		}
-		s.state.SystemProxyEnabled = false
 	}
 
 	s.state.LastError = ""
@@ -425,6 +572,7 @@ func (s *Service) buildStatus(snapshot serviceSnapshot) api.StatusResponse {
 		DaemonVersion:      version,
 		SocketPath:         s.paths.SocketPath,
 		SubscriptionURL:    snapshot.state.SubscriptionURL,
+		Subscriptions:      toSubscriptionOptions(snapshot.state.Subscriptions),
 		ConfigPath:         s.paths.MihomoConfigPath,
 		LogPath:            s.paths.MihomoLogPath,
 		MihomoPath:         snapshot.binaryPath,
@@ -487,7 +635,7 @@ func (s *Service) sanitizeExistingConfig() (bool, error) {
 func (s *Service) writeManagedConfigLocked() error {
 	runtimeConfig, err := config.BuildProviderRuntimeConfig(
 		s.state.SubscriptionURL,
-		s.paths.ProviderPath,
+		s.providerPathForSubscription(s.state.SubscriptionURL),
 		config.RuntimeSettings{
 			MixedPort:      s.state.MixedPort,
 			ControllerPort: s.state.ControllerPort,
@@ -507,9 +655,121 @@ func (s *Service) writeManagedConfigLocked() error {
 	return nil
 }
 
+func (s *Service) clearProviderCacheLocked(subscriptionURL string) error {
+	providerPath := s.providerPathForSubscription(subscriptionURL)
+	if providerPath == "" {
+		return nil
+	}
+	if err := os.Remove(providerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove provider cache: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) removeManagedRuntimeLocked() error {
+	if err := s.supervisor.Stop(); err != nil {
+		return err
+	}
+	if s.state.SystemProxyEnabled {
+		if err := s.disableSystemProxyLocked(); err != nil {
+			return err
+		}
+	}
+	s.state.SubscriptionURL = ""
+	s.state.LastError = ""
+	s.state.LastSyncAt = time.Time{}
+	paths := []string{s.paths.SubscriptionPath, s.paths.MihomoConfigPath}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Service) providerPathForSubscription(subscriptionURL string) string {
+	trimmed := strings.TrimSpace(subscriptionURL)
+	if trimmed == "" {
+		return s.paths.ProviderPath
+	}
+	sum := sha1.Sum([]byte(trimmed))
+	name := "subscription-" + hex.EncodeToString(sum[:8]) + ".yaml"
+	return filepath.Join(s.paths.ProviderDir, name)
+}
+
+func (s *Service) waitForManagedProxies() error {
+	snapshot := s.snapshot()
+	if !snapshot.running {
+		return errors.New("mihomo is not running")
+	}
+
+	deadline := time.Now().Add(proxyLoadTimeout)
+	for time.Now().Before(deadline) {
+		_, proxies, err := mihomo.GetProxyGroup(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName)
+		if err == nil && hasManagedProxies(proxies) {
+			return nil
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return errors.New("subscription nodes did not load in time")
+}
+
+func hasManagedProxies(proxies []api.ProxyOption) bool {
+	if len(proxies) == 0 {
+		return false
+	}
+	if len(proxies) == 1 && strings.EqualFold(strings.TrimSpace(proxies[0].Name), "COMPATIBLE") {
+		return false
+	}
+	return true
+}
+
 func (s *Service) recordErrorLocked(message string) {
 	s.state.LastError = message
 	_ = config.SaveState(s.paths.StatePath, s.state)
+}
+
+func (s *Service) enableSystemProxyLocked() error {
+	if !s.supervisor.Running() {
+		return errors.New("mihomo is not running")
+	}
+	if !s.state.SystemProxyEnabled {
+		snapshot, err := macos.CaptureSystemProxySnapshot()
+		if err != nil {
+			return err
+		}
+		s.state.SystemProxySnapshot = snapshot
+	}
+	if err := macos.SetMixedProxy(s.state.MixedPort); err != nil {
+		return err
+	}
+	s.state.SystemProxyEnabled = true
+	return nil
+}
+
+func (s *Service) disableSystemProxyLocked() error {
+	if s.state.SystemProxySnapshot != nil && !s.state.SystemProxySnapshot.Empty() {
+		if err := macos.RestoreSystemProxy(*s.state.SystemProxySnapshot); err != nil {
+			return err
+		}
+	} else {
+		if err := macos.DisableSystemProxy(); err != nil {
+			return err
+		}
+	}
+	s.state.SystemProxyEnabled = false
+	s.state.SystemProxySnapshot = nil
+	return nil
+}
+
+func (s *Service) recoverRuntimeFailureLocked(err error) error {
+	if !s.state.SystemProxyEnabled {
+		return err
+	}
+	if restoreErr := s.disableSystemProxyLocked(); restoreErr != nil {
+		return fmt.Errorf("%w; additionally failed to restore system proxy: %v", err, restoreErr)
+	}
+	return fmt.Errorf("%w; system proxy restored to previous settings", err)
 }
 
 func (s *Service) storeProxyMetric(name string, latencyMS int, speedBPS int64) {
@@ -542,9 +802,48 @@ func (s *Service) withProxyMetrics(proxies []api.ProxyOption) []api.ProxyOption 
 	return merged
 }
 
+func toSubscriptionOptions(subscriptions []config.SubscriptionEntry) []api.SubscriptionOption {
+	if len(subscriptions) == 0 {
+		return nil
+	}
+	options := make([]api.SubscriptionOption, 0, len(subscriptions))
+	for _, subscription := range subscriptions {
+		if strings.TrimSpace(subscription.URL) == "" {
+			continue
+		}
+		options = append(options, api.SubscriptionOption{Name: subscription.Name, URL: subscription.URL})
+	}
+	return options
+}
+
+func containsSelectedSubscription(subscriptions []config.SubscriptionEntry, url string) bool {
+	for _, subscription := range subscriptions {
+		if subscription.URL == url {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Service) writePID() error {
 	pid := os.Getpid()
 	return os.WriteFile(s.paths.PIDFile, []byte(fmt.Sprintf("%d", pid)), 0o644)
+}
+
+func (s *Service) shutdownSystemProxy() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.state.SystemProxyEnabled {
+		return nil
+	}
+	if err := s.disableSystemProxyLocked(); err != nil {
+		return err
+	}
+	if err := config.SaveState(s.paths.StatePath, s.state); err != nil {
+		return fmt.Errorf("save state: %w", err)
+	}
+	return nil
 }
 
 func nowUTC() time.Time {

@@ -47,13 +47,19 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("hnetd stopped")
+	case "restart":
+		if err := restartDetached(paths); err != nil {
+			fmt.Fprintf(os.Stderr, "hnetd restart: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("hnetd restarted, socket: %s\n", paths.SocketPath)
 	case "status":
 		if err := printStatus(paths); err != nil {
 			fmt.Fprintf(os.Stderr, "hnetd status: %v\n", err)
 			os.Exit(1)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: %s [serve|start|stop|status]\n", filepath.Base(os.Args[0]))
+		fmt.Fprintf(os.Stderr, "usage: %s [serve|start|stop|restart|status]\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
 }
@@ -104,7 +110,7 @@ func startDetached(paths app.Paths) error {
 		return err
 	}
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if ok, _ := socketAlive(paths.SocketPath); ok {
 			return nil
@@ -141,6 +147,20 @@ func stopDetached(paths app.Paths) error {
 	}
 
 	return errors.New("daemon did not exit in time")
+}
+
+func restartDetached(paths app.Paths) error {
+	if ok, _ := socketAlive(paths.SocketPath); ok {
+		if err := stopDetached(paths); err != nil {
+			return err
+		}
+	} else if pid, ok := readPID(paths.PIDFile); ok && processAlive(pid) {
+		if err := stopDetached(paths); err != nil {
+			return err
+		}
+	}
+
+	return startDetached(paths)
 }
 
 func printStatus(paths app.Paths) error {

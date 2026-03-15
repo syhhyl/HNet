@@ -18,6 +18,11 @@ type Client struct {
 	baseURL    string
 }
 
+const (
+	defaultRequestTimeout = 10 * time.Second
+	mutationTimeout       = 60 * time.Second
+)
+
 func New(socketPath string) *Client {
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -27,7 +32,7 @@ func New(socketPath string) *Client {
 	}
 
 	return &Client{
-		httpClient: &http.Client{Timeout: 10 * time.Second, Transport: transport},
+		httpClient: &http.Client{Transport: transport},
 		baseURL:    "http://hnetd",
 	}
 }
@@ -37,7 +42,7 @@ func (c *Client) Status() (*api.StatusResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.do(req)
+	return c.do(req, defaultRequestTimeout)
 }
 
 func (c *Client) ImportSubscription(url string) (*api.StatusResponse, error) {
@@ -51,7 +56,35 @@ func (c *Client) ImportSubscription(url string) (*api.StatusResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
+	return c.do(req, mutationTimeout)
+}
+
+func (c *Client) SelectSubscription(url string) (*api.StatusResponse, error) {
+	body, err := json.Marshal(api.SelectSubscriptionRequest{URL: url})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/v1/subscription/select", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, mutationTimeout)
+}
+
+func (c *Client) DeleteSubscription(url string) (*api.StatusResponse, error) {
+	body, err := json.Marshal(api.DeleteSubscriptionRequest{URL: url})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/v1/subscription/delete", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, mutationTimeout)
 }
 
 func (c *Client) SelectProxy(name string) (*api.StatusResponse, error) {
@@ -65,7 +98,7 @@ func (c *Client) SelectProxy(name string) (*api.StatusResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
+	return c.do(req, mutationTimeout)
 }
 
 func (c *Client) TestProxy(name string) (*api.StatusResponse, error) {
@@ -79,7 +112,7 @@ func (c *Client) TestProxy(name string) (*api.StatusResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
+	return c.do(req, mutationTimeout)
 }
 
 func (c *Client) SetSystemProxy(enabled bool) (*api.StatusResponse, error) {
@@ -93,10 +126,16 @@ func (c *Client) SetSystemProxy(enabled bool) (*api.StatusResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return c.do(req)
+	return c.do(req, mutationTimeout)
 }
 
-func (c *Client) do(req *http.Request) (*api.StatusResponse, error) {
+func (c *Client) do(req *http.Request, timeout time.Duration) (*api.StatusResponse, error) {
+	if timeout > 0 {
+		ctx, cancel := context.WithTimeout(req.Context(), timeout)
+		defer cancel()
+		req = req.Clone(ctx)
+	}
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err

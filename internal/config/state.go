@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,14 +18,49 @@ const (
 )
 
 type PersistedState struct {
-	SubscriptionURL    string    `json:"subscription_url,omitempty"`
-	MihomoPath         string    `json:"mihomo_path,omitempty"`
-	Secret             string    `json:"secret"`
-	MixedPort          int       `json:"mixed_port"`
-	ControllerPort     int       `json:"controller_port"`
-	SystemProxyEnabled bool      `json:"system_proxy_enabled,omitempty"`
-	LastSyncAt         time.Time `json:"last_sync_at,omitempty"`
-	LastError          string    `json:"last_error,omitempty"`
+	SubscriptionURL     string               `json:"subscription_url,omitempty"`
+	Subscriptions       []SubscriptionEntry  `json:"subscriptions,omitempty"`
+	MihomoPath          string               `json:"mihomo_path,omitempty"`
+	Secret              string               `json:"secret"`
+	MixedPort           int                  `json:"mixed_port"`
+	ControllerPort      int                  `json:"controller_port"`
+	SystemProxyEnabled  bool                 `json:"system_proxy_enabled,omitempty"`
+	SystemProxySnapshot *SystemProxySnapshot `json:"system_proxy_snapshot,omitempty"`
+	LastSyncAt          time.Time            `json:"last_sync_at,omitempty"`
+	LastError           string               `json:"last_error,omitempty"`
+}
+
+type SubscriptionEntry struct {
+	Name string `json:"name,omitempty"`
+	URL  string `json:"url"`
+}
+
+type SystemProxySnapshot struct {
+	Services map[string]SystemNetworkServiceProxy `json:"services,omitempty"`
+}
+
+type SystemNetworkServiceProxy struct {
+	Web                SystemManualProxy `json:"web,omitempty"`
+	SecureWeb          SystemManualProxy `json:"secure_web,omitempty"`
+	Socks              SystemManualProxy `json:"socks,omitempty"`
+	AutoProxyURL       SystemAutoProxy   `json:"auto_proxy_url,omitempty"`
+	ProxyAutoDiscovery bool              `json:"proxy_auto_discovery,omitempty"`
+}
+
+type SystemManualProxy struct {
+	Enabled       bool   `json:"enabled,omitempty"`
+	Server        string `json:"server,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	Authenticated bool   `json:"authenticated,omitempty"`
+}
+
+type SystemAutoProxy struct {
+	Enabled bool   `json:"enabled,omitempty"`
+	URL     string `json:"url,omitempty"`
+}
+
+func (s *SystemProxySnapshot) Empty() bool {
+	return s == nil || len(s.Services) == 0
 }
 
 func LoadState(path string) (PersistedState, error) {
@@ -47,6 +85,7 @@ func LoadState(path string) (PersistedState, error) {
 	if state.ControllerPort == 0 {
 		state.ControllerPort = DefaultControllerPort
 	}
+	state.normalizeSubscriptions()
 	return state, nil
 }
 
@@ -72,4 +111,141 @@ func randomSecret() string {
 		return fmt.Sprintf("fallback-%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(buf)
+}
+
+func (s *PersistedState) normalizeSubscriptions() {
+	if s == nil {
+		return
+	}
+
+	if s.SubscriptionURL != "" && !containsSubscription(s.Subscriptions, s.SubscriptionURL) {
+		s.Subscriptions = append([]SubscriptionEntry{{URL: s.SubscriptionURL}}, s.Subscriptions...)
+	}
+
+	if s.SubscriptionURL == "" && len(s.Subscriptions) > 0 {
+		s.SubscriptionURL = s.Subscriptions[0].URL
+	}
+
+	seen := make(map[string]struct{}, len(s.Subscriptions))
+	filtered := make([]SubscriptionEntry, 0, len(s.Subscriptions))
+	for _, subscription := range s.Subscriptions {
+		if subscription.URL == "" {
+			continue
+		}
+		if _, ok := seen[subscription.URL]; ok {
+			continue
+		}
+		seen[subscription.URL] = struct{}{}
+		filtered = append(filtered, subscription)
+	}
+	assignSubscriptionNames(filtered)
+	s.Subscriptions = filtered
+
+	if s.SubscriptionURL != "" && !containsSubscription(s.Subscriptions, s.SubscriptionURL) {
+		s.SubscriptionURL = ""
+	}
+	if s.SubscriptionURL == "" && len(s.Subscriptions) > 0 {
+		s.SubscriptionURL = s.Subscriptions[0].URL
+	}
+}
+
+func (s *PersistedState) UpsertSubscription(url string) {
+	if s == nil || url == "" {
+		return
+	}
+	if !containsSubscription(s.Subscriptions, url) {
+		s.Subscriptions = append(s.Subscriptions, SubscriptionEntry{URL: url})
+	}
+	s.SubscriptionURL = url
+	s.normalizeSubscriptions()
+}
+
+func (s *PersistedState) SelectSubscription(url string) bool {
+	if s == nil || url == "" || !containsSubscription(s.Subscriptions, url) {
+		return false
+	}
+	s.SubscriptionURL = url
+	return true
+}
+
+func (s *PersistedState) DeleteSubscription(url string) (removed bool, deletedActive bool, nextURL string) {
+	if s == nil || url == "" {
+		return false, false, ""
+	}
+
+	index := -1
+	filtered := make([]SubscriptionEntry, 0, len(s.Subscriptions))
+	for i, subscription := range s.Subscriptions {
+		if subscription.URL == url {
+			if index == -1 {
+				index = i
+			}
+			continue
+		}
+		filtered = append(filtered, subscription)
+	}
+	if index == -1 {
+		return false, false, s.SubscriptionURL
+	}
+
+	deletedActive = s.SubscriptionURL == url
+	s.Subscriptions = filtered
+	if len(filtered) == 0 {
+		s.SubscriptionURL = ""
+		s.normalizeSubscriptions()
+		return true, deletedActive, ""
+	}
+
+	if deletedActive {
+		nextIndex := index
+		if nextIndex >= len(filtered) {
+			nextIndex = len(filtered) - 1
+		}
+		s.SubscriptionURL = filtered[nextIndex].URL
+	}
+	s.normalizeSubscriptions()
+	return true, deletedActive, s.SubscriptionURL
+}
+
+func containsSubscription(subscriptions []SubscriptionEntry, url string) bool {
+	for _, subscription := range subscriptions {
+		if subscription.URL == url {
+			return true
+		}
+	}
+	return false
+}
+
+func assignSubscriptionNames(subscriptions []SubscriptionEntry) {
+	if len(subscriptions) == 0 {
+		return
+	}
+	used := make(map[string]int, len(subscriptions))
+	for i := range subscriptions {
+		base := strings.TrimSpace(subscriptions[i].Name)
+		if base == "" {
+			base = defaultSubscriptionName(subscriptions[i].URL)
+		}
+		count := used[base]
+		used[base] = count + 1
+		if count == 0 {
+			subscriptions[i].Name = base
+			continue
+		}
+		subscriptions[i].Name = base + " " + strconv.Itoa(count+1)
+	}
+}
+
+func defaultSubscriptionName(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return "subscription"
+	}
+	parsed, err := url.Parse(trimmed)
+	if err == nil {
+		if host := strings.TrimSpace(parsed.Host); host != "" {
+			return host
+		}
+	}
+	return "subscription"
 }
