@@ -61,11 +61,14 @@ func (s *Supervisor) startLocked(controllerPort int, secret string) (string, err
 		return "", err
 	}
 
-	if err := os.MkdirAll(filepath.Dir(s.paths.MihomoLogPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.paths.MihomoLogPath), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(filepath.Dir(s.paths.MihomoLogPath), 0o700); err != nil {
 		return "", err
 	}
 
-	logFile, err := os.OpenFile(s.paths.MihomoLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(s.paths.MihomoLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return "", err
 	}

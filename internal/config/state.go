@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"hnet/internal/fileutil"
 )
 
 const (
@@ -74,7 +76,7 @@ func LoadState(path string) (PersistedState, error) {
 
 	var state PersistedState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return PersistedState{}, err
+		return PersistedState{}, fmt.Errorf("decode state file %q: %w", path, err)
 	}
 	if state.Secret == "" {
 		state.Secret = randomSecret()
@@ -94,7 +96,7 @@ func SaveState(path string, state PersistedState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return fileutil.WriteFileAtomic(path, data, 0o600)
 }
 
 func defaultState() (PersistedState, error) {

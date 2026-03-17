@@ -1,6 +1,10 @@
 package macos
 
-import "testing"
+import (
+	"testing"
+
+	"hnet/internal/config"
+)
 
 func TestParseKeyValueLines(t *testing.T) {
 	values := parseKeyValueLines("Enabled: Yes\nServer: 127.0.0.1\nPort: 7890\n")
@@ -50,5 +54,25 @@ func TestNormalizeNetworksetupValue(t *testing.T) {
 	}
 	if got := normalizeNetworksetupValue(" 127.0.0.1 "); got != "127.0.0.1" {
 		t.Fatalf("expected trimmed server value, got %q", got)
+	}
+}
+
+func TestValidateSupportedServiceProxyRejectsAuthenticatedProxy(t *testing.T) {
+	err := validateSupportedServiceProxy("Wi-Fi", config.SystemNetworkServiceProxy{
+		Web: config.SystemManualProxy{Authenticated: true},
+	})
+	if err == nil {
+		t.Fatal("expected authenticated proxy validation error")
+	}
+}
+
+func TestValidateSupportedServiceProxyAllowsUnauthenticatedProxy(t *testing.T) {
+	err := validateSupportedServiceProxy("Wi-Fi", config.SystemNetworkServiceProxy{
+		Web:       config.SystemManualProxy{Enabled: true, Server: "127.0.0.1", Port: 7890},
+		SecureWeb: config.SystemManualProxy{},
+		Socks:     config.SystemManualProxy{},
+	})
+	if err != nil {
+		t.Fatalf("validateSupportedServiceProxy() error = %v", err)
 	}
 }

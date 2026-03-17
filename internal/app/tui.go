@@ -2,7 +2,6 @@ package app
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -22,6 +21,7 @@ var (
 	focusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	currentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	disabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	actionStyle   = lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 )
 
 type page int
@@ -44,9 +44,10 @@ type statusMsg struct {
 }
 
 type actionMsg struct {
-	status *api.StatusResponse
-	err    error
-	flash  string
+	status  *api.StatusResponse
+	err     error
+	flash   string
+	hideURL bool
 }
 
 type model struct {
@@ -114,6 +115,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.flash = msg.flash
 		m.status = msg.status
 		m.syncFromStatus()
+		if msg.hideURL {
+			m.finishSubscriptionInput()
+		}
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -173,9 +177,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.configFocus == configFocusSubscriptions {
 			switch msg.String() {
+			case "a":
+				m.focusSubscriptionInput("")
+				return m, nil
 			case "i":
-				m.configFocus = configFocusInput
-				m.input.Focus()
+				value := ""
+				if subscription, ok := m.selectedSubscription(); ok {
+					value = subscription.URL
+				} else if m.status != nil {
+					value = m.status.SubscriptionURL
+				}
+				m.focusSubscriptionInput(value)
+				return m, nil
+			case "u":
+				if subscription, ok := m.selectedSubscription(); ok {
+					m.busy = true
+					m.flash = ""
+					m.err = ""
+					return m, m.updateSubscriptionCmd(subscription.URL)
+				}
 				return m, nil
 			case "d":
 				if subscription, ok := m.selectedSubscription(); ok {
@@ -196,6 +216,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.busy = true
 					m.flash = ""
 					m.err = ""
+					if m.status != nil && subscription.URL == m.status.SubscriptionURL {
+						return m, m.updateSubscriptionCmd(subscription.URL)
+					}
 					return m, m.selectSubscriptionCmd(subscription.URL)
 				}
 			}
@@ -204,8 +227,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "esc":
-			m.configFocus = configFocusSubscriptions
-			m.input.Blur()
+			m.finishSubscriptionInput()
 			return m, nil
 		case "enter", "ctrl+s":
 			value := strings.TrimSpace(m.input.Value())
@@ -262,9 +284,6 @@ func (m *model) syncFromStatus() {
 	if m.status == nil {
 		return
 	}
-	if strings.TrimSpace(m.input.Value()) == "" {
-		m.input.SetValue(m.status.SubscriptionURL)
-	}
 	if len(m.status.AvailableProxies) == 0 {
 		m.cursor = 0
 	} else {
@@ -285,7 +304,7 @@ func (m *model) syncFromStatus() {
 	if len(m.status.Subscriptions) == 0 {
 		m.subscriptionCursor = 0
 		if m.activePage == pageConfig {
-			m.configFocus = configFocusInput
+			m.focusSubscriptionInput("")
 		}
 		return
 	}
@@ -307,16 +326,15 @@ func (m *model) togglePage() {
 	if m.activePage == pageNodes {
 		m.activePage = pageConfig
 		if len(m.availableSubscriptions()) == 0 {
-			m.configFocus = configFocusInput
-			m.input.Focus()
+			m.focusSubscriptionInput("")
 		} else {
 			m.configFocus = configFocusSubscriptions
-			m.input.Blur()
+			m.resetSubscriptionInput()
 		}
 		return
 	}
 	m.activePage = pageNodes
-	m.input.Blur()
+	m.resetSubscriptionInput()
 }
 
 func (m *model) moveCursor(delta int) {
@@ -384,7 +402,10 @@ func (m model) renderNodesPage() string {
 
 func (m model) renderConfigPage() string {
 	lines := []string{
-		hintStyle.Render("j/k select subscription  Enter switch  d delete  i edit URL  Ctrl+S import  Esc done  p toggle system proxy  Tab nodes  r refresh  q quit"),
+		hintStyle.Render("j/k select subscription  Enter switch/update  u update  a add  i edit URL  d delete  Ctrl+S import  Esc done  p toggle system proxy  Tab nodes  r refresh  q quit"),
+		labelStyle.Render("Actions"),
+		m.renderConfigActions(),
+		"",
 		focusTitle("New Subscription URL", m.activePage == pageConfig && m.configFocus == configFocusInput),
 		m.input.View(),
 		"",
@@ -524,21 +545,28 @@ func (m model) fetchStatusCmd() tea.Cmd {
 func (m model) importCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.client.ImportSubscription(url)
-		return actionMsg{status: status, err: err, flash: "subscription imported and mihomo restarted"}
+		return actionMsg{status: status, err: err, flash: "subscription imported and mihomo restarted", hideURL: true}
+	}
+}
+
+func (m model) updateSubscriptionCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		status, err := m.client.SelectSubscription(url)
+		return actionMsg{status: status, err: err, flash: "subscription updated", hideURL: true}
 	}
 }
 
 func (m model) selectSubscriptionCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.client.SelectSubscription(url)
-		return actionMsg{status: status, err: err, flash: "subscription switched"}
+		return actionMsg{status: status, err: err, flash: "subscription switched", hideURL: true}
 	}
 }
 
 func (m model) deleteSubscriptionCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.client.DeleteSubscription(url)
-		return actionMsg{status: status, err: err, flash: "subscription deleted"}
+		return actionMsg{status: status, err: err, flash: "subscription deleted", hideURL: true}
 	}
 }
 
@@ -566,7 +594,7 @@ func (m model) systemProxyCmd(enabled bool, flash string) tea.Cmd {
 func (m model) renderSubscriptions() string {
 	subscriptions := m.availableSubscriptions()
 	if len(subscriptions) == 0 {
-		return hintStyle.Render("No subscriptions yet. Press i to input a new subscription URL.")
+		return hintStyle.Render("No subscriptions yet. Press a to add a new subscription URL.")
 	}
 
 	start, end := proxyWindow(len(subscriptions), m.subscriptionCursor, 8)
@@ -581,13 +609,7 @@ func (m model) renderSubscriptions() string {
 		if subscription.URL == m.status.SubscriptionURL {
 			current = "*"
 		}
-		line := fmt.Sprintf(
-			"%s%s %s  %s",
-			cursor,
-			current,
-			subscriptionDisplayName(subscription),
-			subscriptionDisplayHint(subscription.URL),
-		)
+		line := fmt.Sprintf("%s%s %s", cursor, current, subscriptionDisplayName(subscription))
 		style := disabledStyle
 		if subscription.URL == m.status.SubscriptionURL {
 			style = currentStyle
@@ -598,6 +620,41 @@ func (m model) renderSubscriptions() string {
 		lines = append(lines, hintStyle.Render(fmt.Sprintf("... %d more", len(subscriptions)-end)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m *model) focusSubscriptionInput(value string) {
+	m.configFocus = configFocusInput
+	m.input.Focus()
+	m.input.SetValue(value)
+}
+
+func (m *model) resetSubscriptionInput() {
+	m.input.SetValue("")
+	m.input.Blur()
+}
+
+func (m *model) finishSubscriptionInput() {
+	if len(m.availableSubscriptions()) == 0 {
+		m.focusSubscriptionInput("")
+		return
+	}
+	m.configFocus = configFocusSubscriptions
+	m.resetSubscriptionInput()
+}
+
+func (m model) renderConfigActions() string {
+	systemProxyLabel := "Enable System Proxy"
+	if m.status != nil && m.status.SystemProxyEnabled {
+		systemProxyLabel = "Disable System Proxy"
+	}
+
+	actions := []string{
+		renderActionButton("a", "Add Subscription"),
+		renderActionButton("u", "Update Selected"),
+		renderActionButton("i", "Edit URL"),
+		renderActionButton("p", systemProxyLabel),
+	}
+	return strings.Join(actions, "  ")
 }
 
 func emptyFallback(value string, fallback string) string {
@@ -612,6 +669,10 @@ func focusTitle(title string, focused bool) string {
 		return focusStyle.Render(title + " [active]")
 	}
 	return labelStyle.Render(title)
+}
+
+func renderActionButton(key string, label string) string {
+	return actionStyle.Render("[" + key + "] " + label)
 }
 
 func formatLatency(latencyMS int) string {
@@ -634,48 +695,11 @@ func formatSpeed(speedBPS int64) string {
 	return fmt.Sprintf("%dB/s", speedBPS)
 }
 
-func formatSubscriptionLabel(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return truncateMiddle(trimmed, 96)
-	}
-	label := parsed.Host + parsed.Path
-	if token := parsed.Query().Get("token"); token != "" {
-		label += " token:" + truncateMiddle(token, 16)
-	} else if parsed.RawQuery != "" {
-		label += " ?" + truncateMiddle(parsed.RawQuery, 20)
-	}
-	if strings.TrimSpace(label) == "" {
-		label = trimmed
-	}
-	return truncateMiddle(label, 96)
-}
-
 func subscriptionDisplayName(subscription api.SubscriptionOption) string {
 	if strings.TrimSpace(subscription.Name) != "" {
 		return truncateMiddle(subscription.Name, 32)
 	}
-	return formatSubscriptionLabel(subscription.URL)
-}
-
-func subscriptionDisplayHint(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	parsed, err := url.Parse(trimmed)
-	if err != nil {
-		return ""
-	}
-	hint := parsed.Host
-	if token := parsed.Query().Get("token"); token != "" {
-		hint += " token:" + truncateMiddle(token, 12)
-	}
-	return truncateMiddle(strings.TrimSpace(hint), 42)
+	return "subscription"
 }
 
 func activeSubscriptionName(status *api.StatusResponse) string {
@@ -687,7 +711,7 @@ func activeSubscriptionName(status *api.StatusResponse) string {
 			return subscriptionDisplayName(subscription)
 		}
 	}
-	return formatSubscriptionLabel(status.SubscriptionURL)
+	return "saved subscription"
 }
 
 func truncateMiddle(value string, max int) string {

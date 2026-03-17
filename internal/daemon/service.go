@@ -18,6 +18,7 @@ import (
 	"hnet/internal/api"
 	"hnet/internal/app"
 	"hnet/internal/config"
+	"hnet/internal/fileutil"
 	"hnet/internal/mihomo"
 	"hnet/internal/platform/macos"
 	"hnet/internal/subscription"
@@ -326,10 +327,6 @@ func (s *Service) selectSubscription(rawURL string) (api.StatusResponse, error) 
 	}
 
 	s.mu.Lock()
-	if s.state.SubscriptionURL == normalizedURL {
-		s.mu.Unlock()
-		return s.status(), nil
-	}
 	if !containsSelectedSubscription(s.state.Subscriptions, normalizedURL) {
 		s.mu.Unlock()
 		return api.StatusResponse{}, errors.New("subscription not found")
@@ -626,7 +623,7 @@ func (s *Service) sanitizeExistingConfig() (bool, error) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(s.paths.MihomoConfigPath, sanitizedConfig, 0o644); err != nil {
+	if err := fileutil.WriteFileAtomic(s.paths.MihomoConfigPath, sanitizedConfig, 0o600); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -646,10 +643,10 @@ func (s *Service) writeManagedConfigLocked() error {
 		return err
 	}
 
-	if err := os.WriteFile(s.paths.SubscriptionPath, []byte(s.state.SubscriptionURL+"\n"), 0o644); err != nil {
+	if err := fileutil.WriteFileAtomic(s.paths.SubscriptionPath, []byte(s.state.SubscriptionURL+"\n"), 0o600); err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.paths.MihomoConfigPath, runtimeConfig, 0o644); err != nil {
+	if err := fileutil.WriteFileAtomic(s.paths.MihomoConfigPath, runtimeConfig, 0o600); err != nil {
 		return err
 	}
 	return nil
@@ -733,14 +730,25 @@ func (s *Service) enableSystemProxyLocked() error {
 	if !s.supervisor.Running() {
 		return errors.New("mihomo is not running")
 	}
+
+	var capturedSnapshot *config.SystemProxySnapshot
 	if !s.state.SystemProxyEnabled {
 		snapshot, err := macos.CaptureSystemProxySnapshot()
 		if err != nil {
 			return err
 		}
+		capturedSnapshot = snapshot
 		s.state.SystemProxySnapshot = snapshot
 	}
 	if err := macos.SetMixedProxy(s.state.MixedPort); err != nil {
+		if capturedSnapshot != nil {
+			if restoreErr := macos.RestoreSystemProxy(*capturedSnapshot); restoreErr != nil {
+				s.state.SystemProxySnapshot = nil
+				return fmt.Errorf("%w; additionally failed to restore previous system proxy settings: %v", err, restoreErr)
+			}
+			s.state.SystemProxySnapshot = nil
+			return fmt.Errorf("%w; restored previous system proxy settings", err)
+		}
 		return err
 	}
 	s.state.SystemProxyEnabled = true
@@ -827,7 +835,7 @@ func containsSelectedSubscription(subscriptions []config.SubscriptionEntry, url 
 
 func (s *Service) writePID() error {
 	pid := os.Getpid()
-	return os.WriteFile(s.paths.PIDFile, []byte(fmt.Sprintf("%d", pid)), 0o644)
+	return fileutil.WriteFileAtomic(s.paths.PIDFile, []byte(fmt.Sprintf("%d", pid)), 0o600)
 }
 
 func (s *Service) shutdownSystemProxy() error {

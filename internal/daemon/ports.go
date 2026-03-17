@@ -8,16 +8,21 @@ import (
 	"hnet/internal/config"
 )
 
+var (
+	defaultMixedPort      = config.DefaultMixedPort
+	defaultControllerPort = config.DefaultControllerPort
+)
+
 func ensureRuntimePorts(state config.PersistedState, keepExisting bool) (config.PersistedState, bool, error) {
 	if keepExisting {
 		return state, false, nil
 	}
 
-	mixedPort, err := choosePort(config.DefaultMixedPort, state.MixedPort, nil)
+	mixedPort, err := choosePort(defaultMixedPort, state.MixedPort, nil)
 	if err != nil {
 		return state, false, err
 	}
-	controllerPort, err := choosePort(config.DefaultControllerPort, state.ControllerPort, map[int]struct{}{mixedPort: {}})
+	controllerPort, err := choosePort(defaultControllerPort, state.ControllerPort, map[int]struct{}{mixedPort: {}})
 	if err != nil {
 		return state, false, err
 	}

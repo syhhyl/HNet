@@ -39,6 +39,9 @@ func CaptureSystemProxySnapshot() (*config.SystemProxySnapshot, error) {
 		if err != nil {
 			return nil, err
 		}
+		if err := validateSupportedServiceProxy(service, serviceProxy); err != nil {
+			return nil, err
+		}
 		snapshot.Services[service] = serviceProxy
 	}
 	return snapshot, nil
@@ -199,6 +202,10 @@ func readManualProxy(service string, command manualProxyCommand) (config.SystemM
 }
 
 func restoreManualProxy(service string, command manualProxyCommand, proxy config.SystemManualProxy) error {
+	if proxy.Authenticated {
+		return fmt.Errorf("restore %s proxy: authenticated macOS proxies are not supported", command.label)
+	}
+
 	var result error
 	if proxy.Server != "" && proxy.Port > 0 {
 		if err := runNetworksetup(command.setFlag, service, proxy.Server, strconv.Itoa(proxy.Port), "off"); err != nil {
@@ -334,6 +341,24 @@ func normalizeNetworksetupValue(value string) string {
 		return ""
 	}
 	return trimmed
+}
+
+func validateSupportedServiceProxy(service string, proxy config.SystemNetworkServiceProxy) error {
+	checks := []struct {
+		label string
+		proxy config.SystemManualProxy
+	}{
+		{label: manualProxyCommands[0].label, proxy: proxy.Web},
+		{label: manualProxyCommands[1].label, proxy: proxy.SecureWeb},
+		{label: manualProxyCommands[2].label, proxy: proxy.Socks},
+	}
+
+	for _, check := range checks {
+		if check.proxy.Authenticated {
+			return fmt.Errorf("network service %q uses an authenticated %s proxy; hnet cannot safely manage authenticated macOS proxies", service, check.label)
+		}
+	}
+	return nil
 }
 
 func runNetworksetup(args ...string) error {

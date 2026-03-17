@@ -47,14 +47,21 @@ func ResolvePaths() (Paths, error) {
 }
 
 func (p Paths) Ensure() error {
-	if err := os.MkdirAll(p.BaseDir, 0o755); err != nil {
+	if err := ensurePrivateDir(p.BaseDir); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(p.RuntimeDir, 0o755); err != nil {
+	if err := ensurePrivateDir(p.RuntimeDir); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(p.ProviderDir, 0o755); err != nil {
+	if err := ensurePrivateDir(p.ProviderDir); err != nil {
 		return err
 	}
 	return nil
+}
+
+func ensurePrivateDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o700)
 }

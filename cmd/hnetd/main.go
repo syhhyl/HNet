@@ -85,11 +85,14 @@ func startDetached(paths app.Paths) error {
 		return errors.New("daemon process is already running")
 	}
 
-	if err := os.MkdirAll(paths.BaseDir, 0o755); err != nil {
+	if err := os.MkdirAll(paths.BaseDir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(paths.BaseDir, 0o700); err != nil {
 		return err
 	}
 
-	logFile, err := os.OpenFile(paths.DaemonLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(paths.DaemonLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
