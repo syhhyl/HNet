@@ -62,14 +62,30 @@ func TestConfigPageEditShortcutPrefillsSelectedSubscription(t *testing.T) {
 	}
 }
 
-func TestRenderConfigActionsIncludesAddAndUpdate(t *testing.T) {
-	m := model{}
-	view := m.renderConfigActions()
-	if view == "" {
-		t.Fatal("expected rendered config actions")
+func TestConfigPageStartsOnConfigTab(t *testing.T) {
+	m := model{activePage: pageConfig}
+	view := m.renderPageTabs()
+	if !strings.Contains(view, "Config") {
+		t.Fatalf("expected config tab to be active, got %q", view)
 	}
-	if !containsAll(view, "Add Subscription", "Update Selected") {
-		t.Fatalf("unexpected actions view %q", view)
+}
+
+func TestProxyToggleShortcutIsGlobal(t *testing.T) {
+	m := model{
+		activePage: pageNodes,
+		status: &api.StatusResponse{
+			SystemProxyEnabled: false,
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
+	got := updated.(model)
+
+	if !got.busy {
+		t.Fatal("expected global proxy toggle to enter busy state")
+	}
+	if cmd == nil {
+		t.Fatal("expected global proxy toggle command")
 	}
 }
 
@@ -89,6 +105,26 @@ func TestSyncFromStatusDoesNotExposeSubscriptionURLInInput(t *testing.T) {
 
 	if got := m.input.Value(); got != "" {
 		t.Fatalf("expected blank input after status sync, got %q", got)
+	}
+}
+
+func TestSyncFromStatusDoesNotAutoOpenEditorWithoutSubscriptions(t *testing.T) {
+	m := model{
+		activePage:  pageConfig,
+		configFocus: configFocusSubscriptions,
+		input:       textinput.New(),
+		status: &api.StatusResponse{
+			Subscriptions: nil,
+		},
+	}
+
+	m.syncFromStatus()
+
+	if m.configFocus != configFocusSubscriptions {
+		t.Fatalf("expected subscriptions focus, got %v", m.configFocus)
+	}
+	if m.input.Value() != "" {
+		t.Fatalf("expected hidden editor input to stay empty, got %q", m.input.Value())
 	}
 }
 
@@ -143,11 +179,54 @@ func TestRenderSubscriptionsDoesNotShowSubscriptionURL(t *testing.T) {
 	}
 }
 
-func containsAll(value string, parts ...string) bool {
-	for _, part := range parts {
-		if !strings.Contains(value, part) {
-			return false
-		}
+func TestRenderConfigPageHidesEditorUntilRequested(t *testing.T) {
+	m := model{
+		activePage:  pageConfig,
+		configFocus: configFocusSubscriptions,
+		input:       textinput.New(),
+		status: &api.StatusResponse{
+			SubscriptionURL: "https://one.example.com/sub",
+			Subscriptions: []api.SubscriptionOption{{
+				Name: "one.example.com",
+				URL:  "https://one.example.com/sub",
+			}},
+		},
 	}
-	return true
+
+	view := m.renderConfigPage()
+	if strings.Contains(view, "Add Subscription") || strings.Contains(view, "Edit Subscription URL") {
+		t.Fatalf("expected editor section to be hidden, got %q", view)
+	}
+}
+
+func TestRenderConfigPageShowsEditorWhenAdding(t *testing.T) {
+	m := model{
+		activePage:  pageConfig,
+		configFocus: configFocusSubscriptions,
+		input:       textinput.New(),
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	got := updated.(model)
+	view := got.renderConfigPage()
+
+	if !strings.Contains(view, "Add Subscription") {
+		t.Fatalf("expected add editor section, got %q", view)
+	}
+}
+
+func TestRenderConfigPageShowsShellSourceHint(t *testing.T) {
+	m := model{
+		activePage:  pageConfig,
+		configFocus: configFocusSubscriptions,
+		input:       textinput.New(),
+		status: &api.StatusResponse{
+			ShellEnvPath: "/tmp/hnet/shell_proxy.sh",
+		},
+	}
+
+	view := m.renderConfigPage()
+	if !strings.Contains(view, "source /tmp/hnet/shell_proxy.sh") {
+		t.Fatalf("expected shell env source hint, got %q", view)
+	}
 }

@@ -27,10 +27,11 @@ type Supervisor struct {
 	proc        *runningProcess
 	binaryPath  string
 	lastWaitErr string
+	onExit      func(error)
 }
 
-func NewSupervisor(paths app.Paths) *Supervisor {
-	return &Supervisor{paths: paths}
+func NewSupervisor(paths app.Paths, onExit func(error)) *Supervisor {
+	return &Supervisor{paths: paths, onExit: onExit}
 }
 
 func (s *Supervisor) Apply(controllerPort int, secret string) (string, error) {
@@ -101,15 +102,23 @@ func (s *Supervisor) waitForExit(proc *runningProcess) {
 	proc.done <- err
 	close(proc.done)
 
+	var onExit func(error)
+	unexpected := false
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.proc == proc {
 		s.proc = nil
+		unexpected = true
+		onExit = s.onExit
 	}
 	if err != nil {
 		s.lastWaitErr = err.Error()
 	} else {
 		s.lastWaitErr = ""
+	}
+	s.mu.Unlock()
+
+	if unexpected && onExit != nil {
+		go onExit(err)
 	}
 }
 

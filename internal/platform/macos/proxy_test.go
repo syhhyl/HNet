@@ -76,3 +76,59 @@ func TestValidateSupportedServiceProxyAllowsUnauthenticatedProxy(t *testing.T) {
 		t.Fatalf("validateSupportedServiceProxy() error = %v", err)
 	}
 }
+
+func TestIsManagedProxyForPort(t *testing.T) {
+	proxy := config.SystemNetworkServiceProxy{
+		Web:       config.SystemManualProxy{Enabled: true, Server: "127.0.0.1", Port: 7890},
+		SecureWeb: config.SystemManualProxy{Enabled: true, Server: "127.0.0.1", Port: 7890},
+		Socks:     config.SystemManualProxy{Enabled: true, Server: "127.0.0.1", Port: 7890},
+	}
+
+	if !isManagedProxyForPort(proxy, 7890) {
+		t.Fatal("expected managed proxy settings to match")
+	}
+
+	proxy.AutoProxyURL.Enabled = true
+	if isManagedProxyForPort(proxy, 7890) {
+		t.Fatal("expected auto proxy URL to disqualify managed proxy detection")
+	}
+
+	proxy.AutoProxyURL.Enabled = false
+	proxy.Socks.Port = 7891
+	if isManagedProxyForPort(proxy, 7890) {
+		t.Fatal("expected mismatched port to disqualify managed proxy detection")
+	}
+}
+
+func TestParseNetworkServiceOrder(t *testing.T) {
+	output := `
+An asterisk (*) denotes that a network service is disabled.
+(1) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+(2) USB 10/100/1000 LAN
+(Hardware Port: USB 10/100/1000 LAN, Device: en5)
+`
+
+	bindings := parseNetworkServiceOrder(output)
+	if len(bindings) != 2 {
+		t.Fatalf("expected 2 bindings, got %d", len(bindings))
+	}
+	if bindings[0].Service != "Wi-Fi" || bindings[0].Device != "en0" {
+		t.Fatalf("unexpected first binding: %#v", bindings[0])
+	}
+	if bindings[1].Service != "USB 10/100/1000 LAN" || bindings[1].Device != "en5" {
+		t.Fatalf("unexpected second binding: %#v", bindings[1])
+	}
+}
+
+func TestParseRouteInterface(t *testing.T) {
+	output := `
+   route to: default
+destination: default
+   interface: en0
+`
+
+	if got := parseRouteInterface(output); got != "en0" {
+		t.Fatalf("expected interface en0, got %q", got)
+	}
+}

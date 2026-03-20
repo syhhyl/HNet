@@ -20,11 +20,6 @@ var domesticDoHResolvers = []string{
 	"https://doh.pub/dns-query",
 }
 
-var globalDoHResolvers = []string{
-	"https://1.1.1.1/dns-query",
-	"https://dns.google/dns-query",
-}
-
 var localDirectRules = []string{
 	"DOMAIN-SUFFIX,lan,DIRECT",
 	"DOMAIN-SUFFIX,local,DIRECT",
@@ -93,13 +88,11 @@ var explicitProxyRules = []string{
 }
 
 var chinaDirectRules = []string{
-	"GEOSITE,CN,DIRECT",
 	"DOMAIN-SUFFIX,cn,DIRECT",
 	"GEOIP,CN,DIRECT",
 }
 
 var fallbackProxyRules = []string{
-	"GEOSITE,geolocation-!cn,PROXY",
 	"MATCH,PROXY",
 }
 
@@ -122,11 +115,6 @@ func defaultDNSConfig() map[string]any {
 		"default-nameserver":      append([]string(nil), domesticResolvers...),
 		"nameserver":              append([]string(nil), domesticResolvers...),
 		"proxy-server-nameserver": append([]string(nil), domesticDoHResolvers...),
-		"nameserver-policy": map[string]any{
-			"geosite:private":         append([]string(nil), domesticResolvers...),
-			"geosite:cn":              append([]string(nil), domesticResolvers...),
-			"geosite:geolocation-!cn": append([]string(nil), globalDoHResolvers...),
-		},
 	}
 }
 
@@ -145,21 +133,17 @@ func BuildProviderRuntimeConfig(subscriptionURL string, providerPath string, set
 	}
 
 	doc := map[string]any{
-		"mixed-port":      settings.MixedPort,
-		"allow-lan":       false,
-		"mode":            "rule",
-		"geodata-mode":    false,
-		"geo-auto-update": false,
+		"mixed-port": settings.MixedPort,
+		"allow-lan":  false,
+		"mode":       "rule",
 		"geox-url": map[string]any{
-			"geosite": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat",
-			"mmdb":    "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
+			"mmdb": "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/country.mmdb",
 		},
 		"external-controller": fmt.Sprintf("127.0.0.1:%d", settings.ControllerPort),
 		"secret":              settings.Secret,
-		"log-level":           "info",
+		"log-level":           "warning",
 		"profile": map[string]any{
 			"store-selected": true,
-			"store-fake-ip":  true,
 		},
 		"proxy-providers": map[string]any{
 			"imported": map[string]any{

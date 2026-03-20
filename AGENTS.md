@@ -19,7 +19,7 @@ No Copilot rules were found in `.github/copilot-instructions.md`.
 - Go version is declared in `go.mod`.
 - `mihomo` must be installed separately and available in `PATH`.
 - The daemon stores runtime files under `HNET_HOME` or the user config dir.
-- Root build artifacts are `./hnet` and `./hnetd` when built explicitly.
+- Root build artifacts live under `./build/` when built explicitly.
 
 ## Important Project Conventions
 
@@ -37,14 +37,14 @@ No Copilot rules were found in `.github/copilot-instructions.md`.
   - `make`
 
 - Build both binaries:
-  - `go build -o ./hnet ./cmd/hnet`
-  - `go build -o ./hnetd ./cmd/hnetd`
+  - `mkdir -p build && go build -o ./build/hnet ./cmd/hnet`
+  - `mkdir -p build && go build -o ./build/hnetd ./cmd/hnetd`
 - Build all packages without producing root binaries:
   - `go build ./...`
 - Rebuild daemon only:
-  - `go build -o ./hnetd ./cmd/hnetd`
+  - `mkdir -p build && go build -o ./build/hnetd ./cmd/hnetd`
 - Rebuild TUI only:
-  - `go build -o ./hnet ./cmd/hnet`
+  - `mkdir -p build && go build -o ./build/hnet ./cmd/hnet`
 
 ## Test Commands
 
@@ -83,20 +83,20 @@ Use `gofmt` and `go vet` as the baseline quality checks.
 ## Run Commands
 
 - Start the daemon in background:
-  - `./hnetd start`
+  - `./build/hnetd start`
 - Start the daemon in foreground:
-  - `./hnetd serve`
+  - `./build/hnetd serve`
 - Stop the daemon:
-  - `./hnetd stop`
+  - `./build/hnetd stop`
 - Show daemon status:
-  - `./hnetd status`
+  - `./build/hnetd status`
 - Launch the TUI:
-  - `./hnet`
+  - `./build/hnet`
 
 ## Sandbox / Local Testing
 
 - Use an isolated runtime home during testing:
-  - `HNET_HOME=/tmp/hnet-test ./hnetd start`
+  - `HNET_HOME=/tmp/hnet-test ./build/hnetd start`
 - This prevents polluting the main user config directory.
 - Prefer `HNET_HOME` when testing subscription import or daemon restore behavior.
 - Be careful with macOS system proxy tests because they affect the host machine.
@@ -188,7 +188,7 @@ Before finishing substantive changes, try to run:
 
 - `gofmt -w ./cmd ./internal`
 - `go test ./...`
-- `go build -o ./hnet ./cmd/hnet && go build -o ./hnetd ./cmd/hnetd`
+- `mkdir -p build && go build -o ./build/hnet ./cmd/hnet && go build -o ./build/hnetd ./cmd/hnetd`
 
 For daemon/runtime changes, also try to verify one realistic flow when safe:
 

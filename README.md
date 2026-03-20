@@ -39,8 +39,9 @@ make build
 Manual build:
 
 ```bash
-go build -o ./hnet ./cmd/hnet
-go build -o ./hnetd ./cmd/hnetd
+mkdir -p build
+go build -o ./build/hnet ./cmd/hnet
+go build -o ./build/hnetd ./cmd/hnetd
 ```
 
 Useful helper targets:
@@ -76,19 +77,19 @@ Then reload your shell and run `hnet` / `hnetd` directly.
 Start the daemon:
 
 ```bash
-hnetd start
+./build/hnetd start
 ```
 
 Restart the daemon:
 
 ```bash
-hnetd restart
+./build/hnetd restart
 ```
 
 Open the TUI:
 
 ```bash
-hnet
+./build/hnet
 ```
 
 Type the subscription URL given by your node provider and press `Ctrl+S` to import it.
@@ -104,5 +105,5 @@ Useful files:
 Stop the daemon:
 
 ```bash
-hnetd stop
+./build/hnetd stop
 ```

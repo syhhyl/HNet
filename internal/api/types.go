@@ -48,6 +48,7 @@ type StatusResponse struct {
 	ConfigPath         string               `json:"config_path"`
 	LogPath            string               `json:"log_path"`
 	MihomoPath         string               `json:"mihomo_path,omitempty"`
+	ShellEnvPath       string               `json:"shell_env_path,omitempty"`
 	MixedPort          int                  `json:"mixed_port"`
 	ControllerPort     int                  `json:"controller_port"`
 	CurrentProxy       string               `json:"current_proxy,omitempty"`

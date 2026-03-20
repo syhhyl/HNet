@@ -21,7 +21,6 @@ var (
 	focusStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("81")).Bold(true)
 	currentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	disabledStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	actionStyle   = lipgloss.NewStyle().Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 )
 
 type page int
@@ -78,7 +77,7 @@ func RunTUI(cli *client.Client, paths Paths) error {
 		client:     cli,
 		paths:      paths,
 		input:      input,
-		activePage: pageNodes,
+		activePage: pageConfig,
 	}
 
 	program := tea.NewProgram(m)
@@ -130,6 +129,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.togglePage()
 			return m, nil
+		case "p":
+			if m.status == nil {
+				m.err = "hnetd is not reachable"
+				return m, nil
+			}
+			m.busy = true
+			m.flash = ""
+			m.err = ""
+			enabled := !m.status.SystemProxyEnabled
+			flash := "system proxy disabled"
+			if enabled {
+				flash = "system proxy enabled"
+			}
+			return m, m.systemProxyCmd(enabled, flash)
 		}
 
 		if m.activePage == pageNodes {
@@ -156,23 +169,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			return m, nil
-		}
-
-		switch msg.String() {
-		case "p":
-			if m.status == nil {
-				m.err = "hnetd is not reachable"
-				return m, nil
-			}
-			m.busy = true
-			m.flash = ""
-			m.err = ""
-			enabled := !m.status.SystemProxyEnabled
-			flash := "system proxy disabled"
-			if enabled {
-				flash = "system proxy enabled"
-			}
-			return m, m.systemProxyCmd(enabled, flash)
 		}
 
 		if m.configFocus == configFocusSubscriptions {
@@ -253,9 +249,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("hnet"))
-	b.WriteString("\n")
+	if header := m.renderHeaderStatus(); header != "" {
+		b.WriteString("  ")
+		b.WriteString(header)
+	}
+	b.WriteString("\n\n")
 	b.WriteString(m.renderPageTabs())
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	if m.busy {
 		b.WriteString(hintStyle.Render("Working..."))
@@ -303,9 +303,6 @@ func (m *model) syncFromStatus() {
 
 	if len(m.status.Subscriptions) == 0 {
 		m.subscriptionCursor = 0
-		if m.activePage == pageConfig {
-			m.focusSubscriptionInput("")
-		}
 		return
 	}
 	for i, subscription := range m.status.Subscriptions {
@@ -325,12 +322,8 @@ func (m *model) syncFromStatus() {
 func (m *model) togglePage() {
 	if m.activePage == pageNodes {
 		m.activePage = pageConfig
-		if len(m.availableSubscriptions()) == 0 {
-			m.focusSubscriptionInput("")
-		} else {
-			m.configFocus = configFocusSubscriptions
-			m.resetSubscriptionInput()
-		}
+		m.configFocus = configFocusSubscriptions
+		m.resetSubscriptionInput()
 		return
 	}
 	m.activePage = pageNodes
@@ -367,8 +360,8 @@ func (m *model) moveSubscriptionCursor(delta int) {
 
 func (m model) renderPageTabs() string {
 	return strings.Join([]string{
-		focusTitle("Nodes", m.activePage == pageNodes),
 		focusTitle("Config", m.activePage == pageConfig),
+		focusTitle("Nodes", m.activePage == pageNodes),
 	}, "   ")
 }
 
@@ -377,21 +370,10 @@ func (m model) renderNodesPage() string {
 		return hintStyle.Render(fmt.Sprintf("Waiting for hnetd. Start it with `hnetd start` or `hnetd serve`. Socket: %s", m.paths.SocketPath))
 	}
 
-	running := "stopped"
-	if m.status.Running {
-		running = "running"
-	}
-	systemProxy := "off"
-	if m.status.SystemProxyEnabled {
-		systemProxy = "on"
-	}
-
 	lines := []string{
-		hintStyle.Render("Enter switch node  t test speed/latency  Tab config  r refresh  q quit"),
+		hintStyle.Render("Enter switch node  t test speed/latency  p toggle system proxy  Tab subscriptions  r refresh  q quit"),
 		fmt.Sprintf("current: %s", emptyFallback(m.status.CurrentProxy, "not selected")),
-		fmt.Sprintf("mihomo: %s  system proxy: %s  subscription: %s", running, systemProxy, activeSubscriptionName(m.status)),
 		"",
-		labelStyle.Render("Proxy Nodes"),
 		m.renderProxies(),
 	}
 	if m.status.LastError != "" {
@@ -402,23 +384,64 @@ func (m model) renderNodesPage() string {
 
 func (m model) renderConfigPage() string {
 	lines := []string{
-		hintStyle.Render("j/k select subscription  Enter switch/update  u update  a add  i edit URL  d delete  Ctrl+S import  Esc done  p toggle system proxy  Tab nodes  r refresh  q quit"),
-		labelStyle.Render("Actions"),
-		m.renderConfigActions(),
+		hintStyle.Render(m.configHelpText()),
 		"",
-		focusTitle("New Subscription URL", m.activePage == pageConfig && m.configFocus == configFocusInput),
-		m.input.View(),
+		m.renderConfigSummary(),
 		"",
-		focusTitle("Saved Subscriptions", m.activePage == pageConfig && m.configFocus == configFocusSubscriptions),
+		focusTitle("Subscriptions", m.activePage == pageConfig && m.configFocus == configFocusSubscriptions),
 		m.renderSubscriptions(),
-		"",
-		labelStyle.Render("Config Info"),
-		m.renderStatus(),
+	}
+	if m.configFocus == configFocusInput {
+		lines = append(lines,
+			"",
+			focusTitle(m.subscriptionInputTitle(), true),
+			m.input.View(),
+			hintStyle.Render("Ctrl+S import  Esc cancel"),
+		)
 	}
 	return strings.Join(lines, "\n")
 }
 
-func (m model) renderStatus() string {
+func (m model) renderHeaderStatus() string {
+	if m.status == nil {
+		return hintStyle.Render("daemon offline")
+	}
+	parts := []string{
+		statusChip("mihomo", m.status.Running),
+		statusChip("proxy", m.status.SystemProxyEnabled),
+		fmt.Sprintf("sub %s", activeSubscriptionName(m.status)),
+	}
+	if m.status.Running && m.status.MixedPort > 0 {
+		parts = append(parts, fmt.Sprintf("mixed %d", m.status.MixedPort))
+	}
+	return strings.Join(parts, "  ")
+}
+
+func (m model) renderConfigSummary() string {
+	if m.status == nil {
+		return hintStyle.Render(fmt.Sprintf("Waiting for hnetd. Start it with `hnetd start` or `hnetd serve`. Socket: %s", m.paths.SocketPath))
+	}
+
+	lines := []string{
+		fmt.Sprintf("active: %s", activeSubscriptionName(m.status)),
+		fmt.Sprintf("saved: %d  current proxy: %s", len(m.status.Subscriptions), emptyFallback(m.status.CurrentProxy, "not selected")),
+	}
+	if m.status.LastSyncAt != nil {
+		lines = append(lines, fmt.Sprintf("last sync: %s", m.status.LastSyncAt.Local().Format("2006-01-02 15:04:05")))
+	}
+	if m.status.ShellEnvPath != "" {
+		lines = append(lines, hintStyle.Render(fmt.Sprintf("shell: source %s", m.status.ShellEnvPath)))
+	}
+	if m.status.LastError != "" {
+		lines = append(lines, errorStyle.Render("last error: "+m.status.LastError))
+	}
+	if m.status.Hint != "" {
+		lines = append(lines, hintStyle.Render(m.status.Hint))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) renderStatusSummary() string {
 	if m.status == nil {
 		return hintStyle.Render(fmt.Sprintf("Waiting for hnetd. Start it with `hnetd start` or `hnetd serve`. Socket: %s", m.paths.SocketPath))
 	}
@@ -433,19 +456,10 @@ func (m model) renderStatus() string {
 	}
 
 	lines := []string{
-		fmt.Sprintf("daemon: %s", m.status.DaemonVersion),
-		fmt.Sprintf("mihomo: %s", running),
-		fmt.Sprintf("system proxy: %s", systemProxy),
+		fmt.Sprintf("daemon: %s  mihomo: %s  system proxy: %s", m.status.DaemonVersion, running, systemProxy),
+		fmt.Sprintf("active subscription: %s  saved: %d", activeSubscriptionName(m.status), len(m.status.Subscriptions)),
 		fmt.Sprintf("current proxy: %s", emptyFallback(m.status.CurrentProxy, "not selected")),
-		fmt.Sprintf("active subscription: %s", activeSubscriptionName(m.status)),
-		fmt.Sprintf("subscription count: %d", len(m.status.Subscriptions)),
-		fmt.Sprintf("mixed port: %d", m.status.MixedPort),
-		fmt.Sprintf("controller port: %d", m.status.ControllerPort),
-		fmt.Sprintf("config: %s", m.status.ConfigPath),
-		fmt.Sprintf("mihomo log: %s", m.status.LogPath),
-	}
-	if m.status.MihomoPath != "" {
-		lines = append(lines, fmt.Sprintf("mihomo binary: %s", m.status.MihomoPath))
+		fmt.Sprintf("mixed port: %d  controller port: %d", m.status.MixedPort, m.status.ControllerPort),
 	}
 	if m.status.LastSyncAt != nil {
 		lines = append(lines, fmt.Sprintf("last sync: %s", m.status.LastSyncAt.Local().Format("2006-01-02 15:04:05")))
@@ -457,6 +471,21 @@ func (m model) renderStatus() string {
 		lines = append(lines, hintStyle.Render(m.status.Hint))
 	}
 
+	return strings.Join(lines, "\n")
+}
+
+func (m model) renderStatusPaths() string {
+	if m.status == nil {
+		return hintStyle.Render(fmt.Sprintf("Socket: %s", m.paths.SocketPath))
+	}
+
+	lines := []string{
+		fmt.Sprintf("config: %s", m.status.ConfigPath),
+		fmt.Sprintf("mihomo log: %s", m.status.LogPath),
+	}
+	if m.status.MihomoPath != "" {
+		lines = append(lines, fmt.Sprintf("mihomo binary: %s", m.status.MihomoPath))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -634,27 +663,25 @@ func (m *model) resetSubscriptionInput() {
 }
 
 func (m *model) finishSubscriptionInput() {
-	if len(m.availableSubscriptions()) == 0 {
-		m.focusSubscriptionInput("")
-		return
-	}
 	m.configFocus = configFocusSubscriptions
 	m.resetSubscriptionInput()
 }
 
-func (m model) renderConfigActions() string {
-	systemProxyLabel := "Enable System Proxy"
-	if m.status != nil && m.status.SystemProxyEnabled {
-		systemProxyLabel = "Disable System Proxy"
+func (m model) configHelpText() string {
+	if m.configFocus == configFocusInput {
+		return "Ctrl+S import  Esc cancel  p toggle system proxy  Tab nodes  r refresh  q quit"
 	}
+	if len(m.availableSubscriptions()) == 0 {
+		return "a add  p toggle system proxy  Tab nodes  r refresh  q quit"
+	}
+	return "a add  i edit URL  Enter switch/update  u update  d delete  p toggle system proxy  Tab nodes  r refresh  q quit"
+}
 
-	actions := []string{
-		renderActionButton("a", "Add Subscription"),
-		renderActionButton("u", "Update Selected"),
-		renderActionButton("i", "Edit URL"),
-		renderActionButton("p", systemProxyLabel),
+func (m model) subscriptionInputTitle() string {
+	if strings.TrimSpace(m.input.Value()) == "" {
+		return "Add Subscription"
 	}
-	return strings.Join(actions, "  ")
+	return "Edit Subscription URL"
 }
 
 func emptyFallback(value string, fallback string) string {
@@ -666,13 +693,16 @@ func emptyFallback(value string, fallback string) string {
 
 func focusTitle(title string, focused bool) string {
 	if focused {
-		return focusStyle.Render(title + " [active]")
+		return focusStyle.Render(title)
 	}
 	return labelStyle.Render(title)
 }
 
-func renderActionButton(key string, label string) string {
-	return actionStyle.Render("[" + key + "] " + label)
+func statusChip(label string, enabled bool) string {
+	if enabled {
+		return okStyle.Render(label + " on")
+	}
+	return disabledStyle.Render(label + " off")
 }
 
 func formatLatency(latencyMS int) string {

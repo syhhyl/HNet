@@ -113,7 +113,7 @@ func startDetached(paths app.Paths) error {
 		return err
 	}
 
-	deadline := time.Now().Add(20 * time.Second)
+	deadline := time.Now().Add(45 * time.Second)
 	for time.Now().Before(deadline) {
 		if ok, _ := socketAlive(paths.SocketPath); ok {
 			return nil

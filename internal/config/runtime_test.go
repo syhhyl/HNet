@@ -64,15 +64,8 @@ func TestBuildProviderRuntimeConfig(t *testing.T) {
 	if !containsStringValue(dnsConfig["proxy-server-nameserver"], "https://dns.alidns.com/dns-query") {
 		t.Fatalf("expected proxy server DoH resolver, got %#v", dnsConfig["proxy-server-nameserver"])
 	}
-	policy, ok := dnsConfig["nameserver-policy"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected nameserver-policy map, got %#v", dnsConfig["nameserver-policy"])
-	}
-	if !containsStringValue(policy["geosite:cn"], "223.5.5.5") {
-		t.Fatalf("expected CN policy resolver, got %#v", policy["geosite:cn"])
-	}
-	if !containsStringValue(policy["geosite:geolocation-!cn"], "https://1.1.1.1/dns-query") {
-		t.Fatalf("expected global policy DoH resolver, got %#v", policy["geosite:geolocation-!cn"])
+	if _, exists := dnsConfig["nameserver-policy"]; exists {
+		t.Fatalf("expected lean dns config without nameserver-policy, got %#v", dnsConfig["nameserver-policy"])
 	}
 
 	rules, ok := doc["rules"].([]any)
@@ -82,14 +75,8 @@ func TestBuildProviderRuntimeConfig(t *testing.T) {
 	if !containsRule(rules, "DOMAIN-SUFFIX,openai.com,PROXY") {
 		t.Fatalf("expected explicit OpenAI proxy rule, got %#v", rules)
 	}
-	if !containsRule(rules, "GEOSITE,CN,DIRECT") {
-		t.Fatalf("expected CN geosite direct rule, got %#v", rules)
-	}
 	if !containsRule(rules, "GEOIP,CN,DIRECT") {
 		t.Fatalf("expected CN geoip direct rule, got %#v", rules)
-	}
-	if !containsRule(rules, "GEOSITE,geolocation-!cn,PROXY") {
-		t.Fatalf("expected geolocation catch-all proxy rule, got %#v", rules)
 	}
 	if rules[len(rules)-1] != "MATCH,PROXY" {
 		t.Fatalf("expected MATCH,PROXY as final rule, got %#v", rules[len(rules)-1])
@@ -98,6 +85,23 @@ func TestBuildProviderRuntimeConfig(t *testing.T) {
 	geoxURL, ok := doc["geox-url"].(map[string]any)
 	if !ok || geoxURL["mmdb"] == nil {
 		t.Fatalf("expected geox-url mmdb config, got %#v", doc["geox-url"])
+	}
+	if _, ok := geoxURL["geosite"]; ok {
+		t.Fatalf("expected lean geox-url without geosite config, got %#v", geoxURL["geosite"])
+	}
+
+	profile, ok := doc["profile"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected profile config, got %#v", doc["profile"])
+	}
+	if profile["store-selected"] != true {
+		t.Fatalf("expected store-selected enabled, got %#v", profile["store-selected"])
+	}
+	if _, ok := profile["store-fake-ip"]; ok {
+		t.Fatalf("expected lean profile without store-fake-ip, got %#v", profile["store-fake-ip"])
+	}
+	if doc["log-level"] != "warning" {
+		t.Fatalf("expected warning log level, got %#v", doc["log-level"])
 	}
 }
 
