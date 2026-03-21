@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -49,10 +50,13 @@ type actionMsg struct {
 	hideURL bool
 }
 
+type pollStatusMsg struct{}
+
 type model struct {
 	client             *client.Client
 	paths              Paths
 	input              textinput.Model
+	deleteConfirmURL   string
 	status             *api.StatusResponse
 	busy               bool
 	flash              string
@@ -95,6 +99,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 	case statusMsg:
+		selectedProxyID := m.selectedProxyID()
+		selectedSubscriptionID := m.selectedSubscriptionID()
 		m.busy = false
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -102,8 +108,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = ""
 		m.status = msg.status
-		m.syncFromStatus()
+		m.syncFromStatus(selectedProxyID, selectedSubscriptionID)
+		if m.subscriptionOpRunning() {
+			return m, pollStatusCmd()
+		}
 	case actionMsg:
+		selectedProxyID := m.selectedProxyID()
+		selectedSubscriptionID := m.selectedSubscriptionID()
 		m.busy = false
 		if msg.err != nil {
 			m.err = msg.err.Error()
@@ -111,12 +122,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.err = ""
-		m.flash = msg.flash
 		m.status = msg.status
-		m.syncFromStatus()
+		m.syncFromStatus(selectedProxyID, selectedSubscriptionID)
+		if m.subscriptionOpRunning() {
+			m.flash = "subscription operation started"
+			if msg.hideURL {
+				m.finishSubscriptionInput()
+			}
+			return m, pollStatusCmd()
+		}
+		m.flash = msg.flash
 		if msg.hideURL {
 			m.finishSubscriptionInput()
 		}
+	case pollStatusMsg:
+		if m.subscriptionOpRunning() {
+			return m, m.fetchStatusCmd()
+		}
+		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
@@ -134,6 +157,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.err = "hnetd is not reachable"
 				return m, nil
 			}
+			if m.subscriptionOpRunning() {
+				m.err = "subscription operation in progress"
+				return m, nil
+			}
 			m.busy = true
 			m.flash = ""
 			m.err = ""
@@ -146,6 +173,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.activePage == pageNodes {
+			if m.subscriptionOpRunning() {
+				switch msg.String() {
+				case "up", "k":
+					m.moveCursor(-1)
+				case "down", "j":
+					m.moveCursor(1)
+				case "enter", "t":
+					m.err = "wait for the subscription operation to finish"
+				}
+				return m, nil
+			}
 			switch msg.String() {
 			case "up", "k":
 				m.moveCursor(-1)
@@ -172,33 +210,55 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.configFocus == configFocusSubscriptions {
-			switch msg.String() {
-			case "a":
-				m.focusSubscriptionInput("")
-				return m, nil
-			case "i":
-				value := ""
-				if subscription, ok := m.selectedSubscription(); ok {
-					value = subscription.URL
-				} else if m.status != nil {
-					value = m.status.SubscriptionURL
-				}
-				m.focusSubscriptionInput(value)
-				return m, nil
-			case "u":
-				if subscription, ok := m.selectedSubscription(); ok {
+			if m.deleteConfirmURL != "" {
+				switch msg.String() {
+				case "esc":
+					m.deleteConfirmURL = ""
+					return m, nil
+				case "enter":
 					m.busy = true
 					m.flash = ""
 					m.err = ""
-					return m, m.updateSubscriptionCmd(subscription.URL)
+					targetURL := m.deleteConfirmURL
+					m.deleteConfirmURL = ""
+					return m, m.deleteSubscriptionCmd(targetURL)
+				}
+				return m, nil
+			}
+
+			switch msg.String() {
+			case "a":
+				if m.subscriptionOpRunning() {
+					m.err = "wait for the subscription operation to finish"
+					return m, nil
+				}
+				m.focusSubscriptionInput("")
+				return m, nil
+			case "u":
+				if m.subscriptionOpRunning() {
+					m.err = "wait for the subscription operation to finish"
+					return m, nil
+				}
+				if subscription, ok := m.selectedSubscription(); ok {
+					if m.status == nil || subscription.URL != m.status.SubscriptionURL {
+						m.err = "refresh only works for the active subscription"
+						return m, nil
+					}
+					m.busy = true
+					m.flash = ""
+					m.err = ""
+					return m, m.refreshSubscriptionCmd(subscription.URL)
 				}
 				return m, nil
 			case "d":
+				if m.subscriptionOpRunning() {
+					m.err = "wait for the subscription operation to finish"
+					return m, nil
+				}
 				if subscription, ok := m.selectedSubscription(); ok {
-					m.busy = true
+					m.deleteConfirmURL = subscription.URL
 					m.flash = ""
 					m.err = ""
-					return m, m.deleteSubscriptionCmd(subscription.URL)
 				}
 				return m, nil
 			case "up", "k":
@@ -209,12 +269,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "enter":
 				if subscription, ok := m.selectedSubscription(); ok {
+					if m.subscriptionOpRunning() {
+						m.err = "wait for the subscription operation to finish"
+						return m, nil
+					}
+					if m.status != nil && subscription.URL == m.status.SubscriptionURL {
+						m.flash = "subscription already active"
+						m.err = ""
+						return m, nil
+					}
 					m.busy = true
 					m.flash = ""
 					m.err = ""
-					if m.status != nil && subscription.URL == m.status.SubscriptionURL {
-						return m, m.updateSubscriptionCmd(subscription.URL)
-					}
 					return m, m.selectSubscriptionCmd(subscription.URL)
 				}
 			}
@@ -280,18 +346,36 @@ func (m model) View() string {
 	return b.String()
 }
 
-func (m *model) syncFromStatus() {
+func (m *model) syncFromStatus(selectedProxyID string, selectedSubscriptionID string) {
 	if m.status == nil {
 		return
 	}
 	if len(m.status.AvailableProxies) == 0 {
 		m.cursor = 0
 	} else {
+		targetProxyID := selectedProxyID
+		if targetProxyID == "" {
+			targetProxyID = m.currentProxyID()
+		}
+		foundProxy := false
 		for i, proxy := range m.status.AvailableProxies {
-			if proxy.Name == m.status.CurrentProxy {
+			if proxyIdentity(proxy) == targetProxyID {
 				m.cursor = i
+				foundProxy = true
 				break
 			}
+		}
+		if !foundProxy {
+			for i, proxy := range m.status.AvailableProxies {
+				if proxy.Name == m.status.CurrentProxy {
+					m.cursor = i
+					foundProxy = true
+					break
+				}
+			}
+		}
+		if !foundProxy {
+			m.cursor = 0
 		}
 		if m.cursor >= len(m.status.AvailableProxies) {
 			m.cursor = len(m.status.AvailableProxies) - 1
@@ -305,11 +389,30 @@ func (m *model) syncFromStatus() {
 		m.subscriptionCursor = 0
 		return
 	}
+	targetSubscriptionID := selectedSubscriptionID
+	if targetSubscriptionID == "" {
+		targetSubscriptionID = m.currentSubscriptionID()
+	}
+	foundSubscription := false
 	for i, subscription := range m.status.Subscriptions {
-		if subscription.URL == m.status.SubscriptionURL {
+		if subscriptionIdentity(subscription) == targetSubscriptionID {
 			m.subscriptionCursor = i
+			foundSubscription = true
 			break
 		}
+	}
+	currentSubscriptionID := m.currentSubscriptionID()
+	if !foundSubscription && targetSubscriptionID != currentSubscriptionID {
+		for i, subscription := range m.status.Subscriptions {
+			if subscriptionIdentity(subscription) == currentSubscriptionID {
+				m.subscriptionCursor = i
+				foundSubscription = true
+				break
+			}
+		}
+	}
+	if !foundSubscription {
+		m.subscriptionCursor = 0
 	}
 	if m.subscriptionCursor >= len(m.status.Subscriptions) {
 		m.subscriptionCursor = len(m.status.Subscriptions) - 1
@@ -387,9 +490,17 @@ func (m model) renderConfigPage() string {
 		hintStyle.Render(m.configHelpText()),
 		"",
 		m.renderConfigSummary(),
+	}
+	if op := m.renderSubscriptionOperation(); op != "" {
+		lines = append(lines, "", op)
+	}
+	lines = append(lines,
 		"",
 		focusTitle("Subscriptions", m.activePage == pageConfig && m.configFocus == configFocusSubscriptions),
 		m.renderSubscriptions(),
+	)
+	if confirm := m.renderDeleteConfirmation(); confirm != "" {
+		lines = append(lines, "", confirm)
 	}
 	if m.configFocus == configFocusInput {
 		lines = append(lines,
@@ -545,12 +656,24 @@ func (m model) availableSubscriptions() []api.SubscriptionOption {
 	return m.status.Subscriptions
 }
 
+func (m model) subscriptionOpRunning() bool {
+	return m.status != nil && m.status.SubscriptionOp != nil && m.status.SubscriptionOp.State == "running"
+}
+
 func (m model) selectedProxy() (api.ProxyOption, bool) {
 	proxies := m.availableProxies()
 	if len(proxies) == 0 || m.cursor < 0 || m.cursor >= len(proxies) {
 		return api.ProxyOption{}, false
 	}
 	return proxies[m.cursor], true
+}
+
+func (m model) selectedProxyID() string {
+	proxy, ok := m.selectedProxy()
+	if !ok {
+		return ""
+	}
+	return proxyIdentity(proxy)
 }
 
 func (m model) selectedSubscription() (api.SubscriptionOption, bool) {
@@ -561,6 +684,46 @@ func (m model) selectedSubscription() (api.SubscriptionOption, bool) {
 	return subscriptions[m.subscriptionCursor], true
 }
 
+func (m model) selectedSubscriptionID() string {
+	subscription, ok := m.selectedSubscription()
+	if !ok {
+		return ""
+	}
+	return subscriptionIdentity(subscription)
+}
+
+func (m model) currentProxyID() string {
+	for _, proxy := range m.availableProxies() {
+		if proxy.Name == m.status.CurrentProxy {
+			return proxyIdentity(proxy)
+		}
+	}
+	return ""
+}
+
+func (m model) currentSubscriptionID() string {
+	for _, subscription := range m.availableSubscriptions() {
+		if subscription.URL == m.status.SubscriptionURL {
+			return subscriptionIdentity(subscription)
+		}
+	}
+	return ""
+}
+
+func proxyIdentity(proxy api.ProxyOption) string {
+	if strings.TrimSpace(proxy.ID) != "" {
+		return proxy.ID
+	}
+	return strings.TrimSpace(proxy.Name)
+}
+
+func subscriptionIdentity(subscription api.SubscriptionOption) string {
+	if strings.TrimSpace(subscription.ID) != "" {
+		return subscription.ID
+	}
+	return strings.TrimSpace(subscription.URL)
+}
+
 func (m model) fetchStatusCmd() tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.client.Status()
@@ -568,24 +731,30 @@ func (m model) fetchStatusCmd() tea.Cmd {
 	}
 }
 
+func pollStatusCmd() tea.Cmd {
+	return tea.Tick(350*time.Millisecond, func(time.Time) tea.Msg {
+		return pollStatusMsg{}
+	})
+}
+
 func (m model) importCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.client.ImportSubscription(url)
-		return actionMsg{status: status, err: err, flash: "subscription imported and mihomo restarted", hideURL: true}
-	}
-}
-
-func (m model) updateSubscriptionCmd(url string) tea.Cmd {
-	return func() tea.Msg {
-		status, err := m.client.SelectSubscription(url)
-		return actionMsg{status: status, err: err, flash: "subscription updated", hideURL: true}
+		return actionMsg{status: status, err: err, flash: "subscription import started", hideURL: true}
 	}
 }
 
 func (m model) selectSubscriptionCmd(url string) tea.Cmd {
 	return func() tea.Msg {
 		status, err := m.client.SelectSubscription(url)
-		return actionMsg{status: status, err: err, flash: "subscription switched", hideURL: true}
+		return actionMsg{status: status, err: err, flash: "subscription switch started", hideURL: true}
+	}
+}
+
+func (m model) refreshSubscriptionCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		status, err := m.client.RefreshSubscription(url)
+		return actionMsg{status: status, err: err, flash: "subscription refresh started"}
 	}
 }
 
@@ -648,13 +817,41 @@ func (m model) renderSubscriptions() string {
 	return strings.Join(lines, "\n")
 }
 
+func (m model) renderSubscriptionOperation() string {
+	if m.status == nil || m.status.SubscriptionOp == nil {
+		return ""
+	}
+	op := m.status.SubscriptionOp
+	label := subscriptionDisplayName(api.SubscriptionOption{URL: op.TargetURL})
+	switch op.State {
+	case "running":
+		return hintStyle.Render(fmt.Sprintf("%s in progress: %s", op.Kind, label))
+	case "failed":
+		return errorStyle.Render(fmt.Sprintf("%s failed: %s", op.Kind, emptyFallback(op.Message, label)))
+	case "succeeded":
+		return okStyle.Render(fmt.Sprintf("%s completed: %s", op.Kind, label))
+	default:
+		return ""
+	}
+}
+
+func (m model) renderDeleteConfirmation() string {
+	if strings.TrimSpace(m.deleteConfirmURL) == "" {
+		return ""
+	}
+	label := subscriptionDisplayName(api.SubscriptionOption{URL: m.deleteConfirmURL})
+	return errorStyle.Render(fmt.Sprintf("Delete %s? Enter confirm  Esc cancel", label))
+}
+
 func (m *model) focusSubscriptionInput(value string) {
 	m.configFocus = configFocusInput
+	m.deleteConfirmURL = ""
 	m.input.Focus()
 	m.input.SetValue(value)
 }
 
 func (m *model) resetSubscriptionInput() {
+	m.deleteConfirmURL = ""
 	m.input.SetValue("")
 	m.input.Blur()
 }
@@ -665,20 +862,26 @@ func (m *model) finishSubscriptionInput() {
 }
 
 func (m model) configHelpText() string {
+	if m.deleteConfirmURL != "" {
+		return "Enter confirm delete  Esc cancel  Tab nodes  r refresh  q quit"
+	}
+	if m.subscriptionOpRunning() {
+		return "Subscription operation running  Tab nodes  r refresh  q quit"
+	}
 	if m.configFocus == configFocusInput {
 		return "Ctrl+S import  Esc cancel  p toggle system proxy  Tab nodes  r refresh  q quit"
 	}
 	if len(m.availableSubscriptions()) == 0 {
 		return "a add  p toggle system proxy  Tab nodes  r refresh  q quit"
 	}
-	return "a add  i edit URL  Enter switch/update  u update  d delete  p toggle system proxy  Tab nodes  r refresh  q quit"
+	return "a add  Enter switch  u refresh active  d delete  p toggle system proxy  Tab nodes  r refresh  q quit"
 }
 
 func (m model) subscriptionInputTitle() string {
 	if strings.TrimSpace(m.input.Value()) == "" {
 		return "Add Subscription"
 	}
-	return "Edit Subscription URL"
+	return "Add Subscription"
 }
 
 func emptyFallback(value string, fallback string) string {

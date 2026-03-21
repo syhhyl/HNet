@@ -36,32 +36,6 @@ func TestConfigPageAddShortcutClearsInput(t *testing.T) {
 	}
 }
 
-func TestConfigPageEditShortcutPrefillsSelectedSubscription(t *testing.T) {
-	m := model{
-		activePage:         pageConfig,
-		configFocus:        configFocusSubscriptions,
-		input:              textinput.New(),
-		subscriptionCursor: 1,
-		status: &api.StatusResponse{
-			SubscriptionURL: "https://first.example.com/sub",
-			Subscriptions: []api.SubscriptionOption{
-				{Name: "first.example.com", URL: "https://first.example.com/sub"},
-				{Name: "second.example.com", URL: "https://second.example.com/sub"},
-			},
-		},
-	}
-
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	got := updated.(model)
-
-	if got.configFocus != configFocusInput {
-		t.Fatalf("expected config focus input, got %v", got.configFocus)
-	}
-	if got.input.Value() != "https://second.example.com/sub" {
-		t.Fatalf("expected selected subscription URL, got %q", got.input.Value())
-	}
-}
-
 func TestConfigPageStartsOnConfigTab(t *testing.T) {
 	m := model{activePage: pageConfig}
 	view := m.renderPageTabs()
@@ -101,7 +75,7 @@ func TestSyncFromStatusDoesNotExposeSubscriptionURLInInput(t *testing.T) {
 		},
 	}
 
-	m.syncFromStatus()
+	m.syncFromStatus("", "")
 
 	if got := m.input.Value(); got != "" {
 		t.Fatalf("expected blank input after status sync, got %q", got)
@@ -118,7 +92,7 @@ func TestSyncFromStatusDoesNotAutoOpenEditorWithoutSubscriptions(t *testing.T) {
 		},
 	}
 
-	m.syncFromStatus()
+	m.syncFromStatus("", "")
 
 	if m.configFocus != configFocusSubscriptions {
 		t.Fatalf("expected subscriptions focus, got %v", m.configFocus)
@@ -194,7 +168,7 @@ func TestRenderConfigPageHidesEditorUntilRequested(t *testing.T) {
 	}
 
 	view := m.renderConfigPage()
-	if strings.Contains(view, "Add Subscription") || strings.Contains(view, "Edit Subscription URL") {
+	if strings.Contains(view, "Add Subscription") {
 		t.Fatalf("expected editor section to be hidden, got %q", view)
 	}
 }
@@ -226,5 +200,164 @@ func TestRenderConfigPageDoesNotShowShellSourceHint(t *testing.T) {
 	view := m.renderConfigPage()
 	if strings.Contains(view, "shell: source") {
 		t.Fatalf("expected shell env source hint to be removed, got %q", view)
+	}
+}
+
+func TestConfigPageEnterOnActiveSubscriptionDoesNotStartWork(t *testing.T) {
+	m := model{
+		activePage:  pageConfig,
+		configFocus: configFocusSubscriptions,
+		input:       textinput.New(),
+		status: &api.StatusResponse{
+			SubscriptionURL: "https://one.example.com/sub",
+			Subscriptions: []api.SubscriptionOption{{
+				Name: "one.example.com",
+				URL:  "https://one.example.com/sub",
+			}},
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := updated.(model)
+
+	if got.busy {
+		t.Fatal("expected active subscription enter to be a no-op")
+	}
+	if cmd != nil {
+		t.Fatal("expected no command for active subscription enter")
+	}
+}
+
+func TestConfigPageRefreshRejectsInactiveSubscription(t *testing.T) {
+	m := model{
+		activePage:         pageConfig,
+		configFocus:        configFocusSubscriptions,
+		input:              textinput.New(),
+		subscriptionCursor: 1,
+		status: &api.StatusResponse{
+			SubscriptionURL: "https://one.example.com/sub",
+			Subscriptions: []api.SubscriptionOption{
+				{Name: "one.example.com", URL: "https://one.example.com/sub"},
+				{Name: "two.example.com", URL: "https://two.example.com/sub"},
+			},
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	got := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected no refresh command for inactive subscription")
+	}
+	if got.err == "" {
+		t.Fatal("expected error when refreshing inactive subscription")
+	}
+}
+
+func TestConfigPageDeleteRequiresConfirmation(t *testing.T) {
+	m := model{
+		activePage:  pageConfig,
+		configFocus: configFocusSubscriptions,
+		input:       textinput.New(),
+		status: &api.StatusResponse{
+			SubscriptionURL: "https://one.example.com/sub",
+			Subscriptions: []api.SubscriptionOption{{
+				Name: "one.example.com",
+				URL:  "https://one.example.com/sub",
+			}},
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	got := updated.(model)
+
+	if cmd != nil {
+		t.Fatal("expected delete to wait for confirmation")
+	}
+	if got.deleteConfirmURL != "https://one.example.com/sub" {
+		t.Fatalf("expected delete confirmation target to be set, got %q", got.deleteConfirmURL)
+	}
+}
+
+func TestStatusUpdateKeepsSelectedProxyCursor(t *testing.T) {
+	m := model{
+		activePage: pageNodes,
+		cursor:     1,
+		status: &api.StatusResponse{
+			CurrentProxy: "node-a",
+			AvailableProxies: []api.ProxyOption{
+				{Name: "node-a", Alive: true},
+				{Name: "node-b", Alive: true},
+				{Name: "node-c", Alive: true},
+			},
+		},
+	}
+
+	updated, _ := m.Update(statusMsg{
+		status: &api.StatusResponse{
+			CurrentProxy: "node-a",
+			AvailableProxies: []api.ProxyOption{
+				{Name: "node-a", Alive: true},
+				{Name: "node-b", Alive: true, LatencyMS: 20},
+				{Name: "node-c", Alive: true},
+			},
+		},
+	})
+	got := updated.(model)
+
+	if got.cursor != 1 {
+		t.Fatalf("expected cursor to stay on selected proxy, got %d", got.cursor)
+	}
+}
+
+func TestSyncFromStatusFallsBackToActiveSubscriptionWhenSelectionDisappears(t *testing.T) {
+	m := model{
+		subscriptionCursor: 1,
+		status: &api.StatusResponse{
+			SubscriptionURL: "https://one.example.com/sub",
+			Subscriptions: []api.SubscriptionOption{
+				{Name: "one.example.com", URL: "https://one.example.com/sub"},
+				{Name: "two.example.com", URL: "https://two.example.com/sub"},
+			},
+		},
+	}
+
+	m.status = &api.StatusResponse{
+		SubscriptionURL: "https://one.example.com/sub",
+		Subscriptions: []api.SubscriptionOption{
+			{Name: "one.example.com", URL: "https://one.example.com/sub"},
+			{Name: "three.example.com", URL: "https://three.example.com/sub"},
+		},
+	}
+	m.syncFromStatus("", "https://two.example.com/sub")
+
+	if m.subscriptionCursor != 0 {
+		t.Fatalf("expected cursor to fall back to active subscription, got %d", m.subscriptionCursor)
+	}
+}
+
+func TestSyncFromStatusKeepsSelectedSubscriptionAcrossURLRenameWhenIDMatches(t *testing.T) {
+	m := model{
+		subscriptionCursor: 1,
+		status: &api.StatusResponse{
+			SubscriptionURL: "https://one.example.com/sub",
+			Subscriptions: []api.SubscriptionOption{
+				{ID: "sub_one", Name: "one.example.com", URL: "https://one.example.com/sub"},
+				{ID: "sub_two", Name: "two.example.com", URL: "https://old.example.com/sub"},
+			},
+		},
+	}
+
+	m.status = &api.StatusResponse{
+		SubscriptionURL: "https://one.example.com/sub",
+		Subscriptions: []api.SubscriptionOption{
+			{ID: "sub_one", Name: "one.example.com", URL: "https://one.example.com/sub"},
+			{ID: "sub_two", Name: "two.example.com", URL: "https://new.example.com/sub"},
+		},
+	}
+	m.syncFromStatus("", "sub_two")
+
+	if m.subscriptionCursor != 1 {
+		t.Fatalf("expected cursor to stay on renamed subscription, got %d", m.subscriptionCursor)
 	}
 }

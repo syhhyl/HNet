@@ -32,8 +32,12 @@ type controllerDelayResponse struct {
 }
 
 func GetProxyGroup(controllerPort int, secret string, group string) (string, []api.ProxyOption, error) {
+	return GetProxyGroupWithTimeout(controllerPort, secret, group, 5*time.Second)
+}
+
+func GetProxyGroupWithTimeout(controllerPort int, secret string, group string, timeout time.Duration) (string, []api.ProxyOption, error) {
 	var response controllerProxiesResponse
-	if err := doControllerRequest(controllerPort, secret, http.MethodGet, "/proxies", nil, &response); err != nil {
+	if err := doControllerRequest(controllerPort, secret, http.MethodGet, "/proxies", nil, &response, timeout); err != nil {
 		return "", nil, err
 	}
 
@@ -45,7 +49,10 @@ func GetProxyGroup(controllerPort int, secret string, group string) (string, []a
 	options := make([]api.ProxyOption, 0, len(groupProxy.All))
 	for _, name := range groupProxy.All {
 		proxy := response.Proxies[name]
+		fingerprint := api.ProxyFingerprint(name, proxy.Type, proxy.ProviderName)
 		options = append(options, api.ProxyOption{
+			ID:           fingerprint,
+			Fingerprint:  fingerprint,
 			Name:         name,
 			Type:         proxy.Type,
 			ProviderName: proxy.ProviderName,
@@ -62,7 +69,7 @@ func SelectProxy(controllerPort int, secret string, group string, name string) e
 		return err
 	}
 	path := "/proxies/" + url.PathEscape(group)
-	return doControllerRequest(controllerPort, secret, http.MethodPut, path, bytes.NewReader(body), nil)
+	return doControllerRequest(controllerPort, secret, http.MethodPut, path, bytes.NewReader(body), nil, 5*time.Second)
 }
 
 func TestProxyDelay(controllerPort int, secret string, name string, targetURL string, timeout time.Duration) (int, error) {
@@ -74,15 +81,18 @@ func TestProxyDelay(controllerPort int, secret string, name string, targetURL st
 	)
 
 	var response controllerDelayResponse
-	if err := doControllerRequest(controllerPort, secret, http.MethodGet, path, nil, &response); err != nil {
+	if err := doControllerRequest(controllerPort, secret, http.MethodGet, path, nil, &response, 5*time.Second); err != nil {
 		return 0, err
 	}
 	return response.Delay, nil
 }
 
-func doControllerRequest(controllerPort int, secret string, method string, path string, body io.Reader, out any) error {
+func doControllerRequest(controllerPort int, secret string, method string, path string, body io.Reader, out any, timeout time.Duration) error {
 	transport := &http.Transport{Proxy: nil}
-	client := &http.Client{Timeout: 5 * time.Second, Transport: transport}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	client := &http.Client{Timeout: timeout, Transport: transport}
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d%s", controllerPort, path)
 
 	req, err := http.NewRequestWithContext(context.Background(), method, endpoint, body)

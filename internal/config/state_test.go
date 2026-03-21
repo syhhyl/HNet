@@ -35,8 +35,14 @@ func TestPersistedStateUpsertSubscriptionDeduplicates(t *testing.T) {
 	if state.Subscriptions[0].Name != "a.example.com" {
 		t.Fatalf("expected generated name a.example.com, got %q", state.Subscriptions[0].Name)
 	}
+	if state.Subscriptions[0].ID == "" {
+		t.Fatal("expected generated id for first subscription")
+	}
 	if state.Subscriptions[1].Name != "b.example.com" {
 		t.Fatalf("expected generated name b.example.com, got %q", state.Subscriptions[1].Name)
+	}
+	if state.Subscriptions[1].ID == "" {
+		t.Fatal("expected generated id for second subscription")
 	}
 }
 

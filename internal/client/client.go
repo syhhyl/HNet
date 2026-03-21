@@ -87,6 +87,20 @@ func (c *Client) DeleteSubscription(url string) (*api.StatusResponse, error) {
 	return c.do(req, mutationTimeout)
 }
 
+func (c *Client) RefreshSubscription(url string) (*api.StatusResponse, error) {
+	body, err := json.Marshal(api.RefreshSubscriptionRequest{URL: url})
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+"/v1/subscription/refresh", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	return c.do(req, mutationTimeout)
+}
+
 func (c *Client) SelectProxy(name string) (*api.StatusResponse, error) {
 	body, err := json.Marshal(api.SelectProxyRequest{Name: name})
 	if err != nil {

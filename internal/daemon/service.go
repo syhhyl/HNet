@@ -29,24 +29,31 @@ const (
 	proxyGroupName           = "PROXY"
 	proxyLoadTimeout         = 15 * time.Second
 	systemProxyGuardInterval = 3 * time.Second
+	statusControllerTimeout  = 500 * time.Millisecond
 )
 
 type Service struct {
-	paths          app.Paths
-	state          config.PersistedState
-	supervisor     *mihomo.Supervisor
-	mu             sync.Mutex
-	runtimeMu      sync.Mutex
-	controllerMu   sync.Mutex
-	proxyMetrics   map[string]proxyMetric
-	restartPending bool
-	shuttingDown   bool
+	paths                app.Paths
+	state                config.PersistedState
+	supervisor           *mihomo.Supervisor
+	mu                   sync.Mutex
+	runtimeMu            sync.Mutex
+	controllerMu         sync.Mutex
+	proxyMetrics         map[string]proxyMetric
+	cachedCurrentProxy   string
+	cachedAvailableProxy []api.ProxyOption
+	subscriptionOp       *api.SubscriptionOperation
+	restartPending       bool
+	shuttingDown         bool
 }
 
 type serviceSnapshot struct {
-	state      config.PersistedState
-	running    bool
-	binaryPath string
+	state                config.PersistedState
+	running              bool
+	binaryPath           string
+	cachedCurrentProxy   string
+	cachedAvailableProxy []api.ProxyOption
+	subscriptionOp       *api.SubscriptionOperation
 }
 
 type proxyMetric struct {
@@ -420,6 +427,7 @@ func (s *Service) routes() http.Handler {
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/subscription", s.handleSubscription)
 	mux.HandleFunc("/v1/subscription/delete", s.handleSubscriptionDelete)
+	mux.HandleFunc("/v1/subscription/refresh", s.handleSubscriptionRefresh)
 	mux.HandleFunc("/v1/subscription/select", s.handleSubscriptionSelect)
 	mux.HandleFunc("/v1/proxy/test", s.handleProxyTest)
 	mux.HandleFunc("/v1/proxy", s.handleProxy)
@@ -447,12 +455,12 @@ func (s *Service) handleSubscription(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status, err := s.importSubscription(request.URL)
+	status, err := s.queueImportSubscription(request.URL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, status)
+	s.writeJSON(w, http.StatusAccepted, status)
 }
 
 func (s *Service) handleSubscriptionSelect(w http.ResponseWriter, r *http.Request) {
@@ -467,12 +475,16 @@ func (s *Service) handleSubscriptionSelect(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	status, err := s.selectSubscription(request.URL)
+	status, async, err := s.selectSubscription(request.URL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, status)
+	statusCode := http.StatusOK
+	if async {
+		statusCode = http.StatusAccepted
+	}
+	s.writeJSON(w, statusCode, status)
 }
 
 func (s *Service) handleSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
@@ -487,12 +499,36 @@ func (s *Service) handleSubscriptionDelete(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	status, err := s.deleteSubscription(request.URL)
+	status, async, err := s.deleteSubscription(request.URL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	s.writeJSON(w, http.StatusOK, status)
+	statusCode := http.StatusOK
+	if async {
+		statusCode = http.StatusAccepted
+	}
+	s.writeJSON(w, statusCode, status)
+}
+
+func (s *Service) handleSubscriptionRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var request api.RefreshSubscriptionRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	status, err := s.refreshSubscription(request.URL)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.writeJSON(w, http.StatusAccepted, status)
 }
 
 func (s *Service) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -555,7 +591,18 @@ func (s *Service) handleSystemProxy(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, status)
 }
 
-func (s *Service) importSubscription(rawURL string) (api.StatusResponse, error) {
+func (s *Service) queueImportSubscription(rawURL string) (api.StatusResponse, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
+	if err != nil {
+		return api.StatusResponse{}, err
+	}
+	return s.startSubscriptionOperation("import", normalizedURL, func() error {
+		_, runErr := s.importSubscriptionSync(normalizedURL)
+		return runErr
+	})
+}
+
+func (s *Service) importSubscriptionSync(rawURL string) (api.StatusResponse, error) {
 	normalizedURL, err := subscription.NormalizeURL(rawURL)
 	if err != nil {
 		return api.StatusResponse{}, err
@@ -564,26 +611,62 @@ func (s *Service) importSubscription(rawURL string) (api.StatusResponse, error) 
 	return s.applySubscription(normalizedURL, true)
 }
 
-func (s *Service) selectSubscription(rawURL string) (api.StatusResponse, error) {
+func (s *Service) selectSubscription(rawURL string) (api.StatusResponse, bool, error) {
 	normalizedURL, err := subscription.NormalizeURL(rawURL)
 	if err != nil {
-		return api.StatusResponse{}, err
+		return api.StatusResponse{}, false, err
 	}
 
 	s.mu.Lock()
 	if !containsSelectedSubscription(s.state.Subscriptions, normalizedURL) {
 		s.mu.Unlock()
-		return api.StatusResponse{}, errors.New("subscription not found")
+		return api.StatusResponse{}, false, errors.New("subscription not found")
+	}
+	if s.state.SubscriptionURL == normalizedURL {
+		s.mu.Unlock()
+		return s.status(), false, nil
 	}
 	s.mu.Unlock()
 
-	return s.applySubscription(normalizedURL, false)
+	status, err := s.startSubscriptionOperation("select", normalizedURL, func() error {
+		_, runErr := s.selectSubscriptionSync(normalizedURL)
+		return runErr
+	})
+	return status, true, err
 }
 
-func (s *Service) deleteSubscription(rawURL string) (api.StatusResponse, error) {
+func (s *Service) selectSubscriptionSync(rawURL string) (api.StatusResponse, error) {
 	normalizedURL, err := subscription.NormalizeURL(rawURL)
 	if err != nil {
 		return api.StatusResponse{}, err
+	}
+	return s.applySubscription(normalizedURL, false)
+}
+
+func (s *Service) deleteSubscription(rawURL string) (api.StatusResponse, bool, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
+	if err != nil {
+		return api.StatusResponse{}, false, err
+	}
+
+	s.mu.Lock()
+	active := s.state.SubscriptionURL == normalizedURL
+	s.mu.Unlock()
+	if active {
+		status, startErr := s.startSubscriptionOperation("delete", normalizedURL, func() error {
+			_, _, runErr := s.deleteSubscriptionSync(normalizedURL)
+			return runErr
+		})
+		return status, true, startErr
+	}
+	status, _, err := s.deleteSubscriptionSync(normalizedURL)
+	return status, false, err
+}
+
+func (s *Service) deleteSubscriptionSync(rawURL string) (api.StatusResponse, bool, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
+	if err != nil {
+		return api.StatusResponse{}, false, err
 	}
 
 	s.runtimeMu.Lock()
@@ -593,49 +676,104 @@ func (s *Service) deleteSubscription(rawURL string) (api.StatusResponse, error) 
 	removed, deletedActive, nextURL := s.state.DeleteSubscription(normalizedURL)
 	if !removed {
 		s.mu.Unlock()
-		return api.StatusResponse{}, errors.New("subscription not found")
+		return api.StatusResponse{}, false, errors.New("subscription not found")
 	}
 	if err := s.clearProviderCacheLocked(normalizedURL); err != nil {
 		s.mu.Unlock()
-		return api.StatusResponse{}, err
+		return api.StatusResponse{}, false, err
 	}
 	s.proxyMetrics = make(map[string]proxyMetric)
 
 	if !deletedActive {
 		if err := config.SaveState(s.paths.StatePath, s.state); err != nil {
 			s.mu.Unlock()
-			return api.StatusResponse{}, fmt.Errorf("save state: %w", err)
+			return api.StatusResponse{}, false, fmt.Errorf("save state: %w", err)
 		}
 		s.mu.Unlock()
-		return s.status(), nil
+		return s.status(), false, nil
 	}
 
 	if nextURL == "" {
 		s.mu.Unlock()
 		if err := s.removeManagedRuntime(); err != nil {
-			return api.StatusResponse{}, err
+			return api.StatusResponse{}, true, err
 		}
 		if err := s.saveState(); err != nil {
-			return api.StatusResponse{}, fmt.Errorf("save state: %w", err)
+			return api.StatusResponse{}, true, fmt.Errorf("save state: %w", err)
 		}
-		return s.status(), nil
+		return s.status(), true, nil
 	}
 
 	if err := s.clearProviderCacheLocked(nextURL); err != nil {
 		s.mu.Unlock()
+		return api.StatusResponse{}, true, err
+	}
+	plan, err := s.buildRuntimePlanLocked(s.supervisor.Running(), true)
+	s.mu.Unlock()
+	if err != nil {
+		s.recordError(err.Error())
+		return api.StatusResponse{}, true, err
+	}
+
+	if err := s.applyRuntimePlan(plan); err != nil {
+		return api.StatusResponse{}, true, err
+	}
+
+	if err := s.waitForManagedProxies(); err != nil {
+		return api.StatusResponse{}, true, err
+	}
+	return s.status(), true, nil
+}
+
+func (s *Service) refreshSubscription(rawURL string) (api.StatusResponse, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
+	if err != nil {
 		return api.StatusResponse{}, err
 	}
+	s.mu.Lock()
+	activeURL := s.state.SubscriptionURL
+	saved := containsSelectedSubscription(s.state.Subscriptions, normalizedURL)
+	s.mu.Unlock()
+	if !saved {
+		return api.StatusResponse{}, errors.New("subscription not found")
+	}
+	if activeURL != normalizedURL {
+		return api.StatusResponse{}, errors.New("only the active subscription can be refreshed")
+	}
+	return s.startSubscriptionOperation("refresh", normalizedURL, func() error {
+		_, runErr := s.refreshSubscriptionSync(normalizedURL)
+		return runErr
+	})
+}
+
+func (s *Service) refreshSubscriptionSync(rawURL string) (api.StatusResponse, error) {
+	normalizedURL, err := subscription.NormalizeURL(rawURL)
+	if err != nil {
+		return api.StatusResponse{}, err
+	}
+
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+
+	s.mu.Lock()
+	if s.state.SubscriptionURL != normalizedURL {
+		s.mu.Unlock()
+		return api.StatusResponse{}, errors.New("only the active subscription can be refreshed")
+	}
+	if err := s.clearProviderCacheLocked(normalizedURL); err != nil {
+		s.mu.Unlock()
+		return api.StatusResponse{}, err
+	}
+	s.proxyMetrics = make(map[string]proxyMetric)
 	plan, err := s.buildRuntimePlanLocked(s.supervisor.Running(), true)
 	s.mu.Unlock()
 	if err != nil {
 		s.recordError(err.Error())
 		return api.StatusResponse{}, err
 	}
-
 	if err := s.applyRuntimePlan(plan); err != nil {
 		return api.StatusResponse{}, err
 	}
-
 	if err := s.waitForManagedProxies(); err != nil {
 		return api.StatusResponse{}, err
 	}
@@ -741,7 +879,7 @@ func (s *Service) testProxy(name string) (api.StatusResponse, error) {
 	s.controllerMu.Lock()
 	defer s.controllerMu.Unlock()
 
-	current, _, err := mihomo.GetProxyGroup(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName)
+	current, proxies, err := mihomo.GetProxyGroup(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName)
 	if err != nil {
 		return api.StatusResponse{}, err
 	}
@@ -774,7 +912,7 @@ func (s *Service) testProxy(name string) (api.StatusResponse, error) {
 		speedBPS = 0
 	}
 
-	s.storeProxyMetric(selected, latencyMS, speedBPS)
+	s.storeProxyMetric(proxyMetricKeyForName(proxies, selected), latencyMS, speedBPS)
 	return s.status(), nil
 }
 
@@ -811,9 +949,12 @@ func (s *Service) snapshot() serviceSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return serviceSnapshot{
-		state:      s.state,
-		running:    s.supervisor.Running(),
-		binaryPath: currentBinaryPath(s.state),
+		state:                s.state,
+		running:              s.supervisor.Running(),
+		binaryPath:           currentBinaryPath(s.state),
+		cachedCurrentProxy:   s.cachedCurrentProxy,
+		cachedAvailableProxy: cloneProxyOptions(s.cachedAvailableProxy),
+		subscriptionOp:       cloneSubscriptionOperation(s.subscriptionOp),
 	}
 }
 
@@ -832,6 +973,9 @@ func (s *Service) buildStatus(snapshot serviceSnapshot) api.StatusResponse {
 		Running:            snapshot.running,
 		LastError:          snapshot.state.LastError,
 	}
+	if snapshot.subscriptionOp != nil {
+		status.SubscriptionOp = snapshot.subscriptionOp
+	}
 	if !snapshot.state.LastSyncAt.IsZero() {
 		lastSyncAt := snapshot.state.LastSyncAt
 		status.LastSyncAt = &lastSyncAt
@@ -843,13 +987,24 @@ func (s *Service) buildStatus(snapshot serviceSnapshot) api.StatusResponse {
 		return status
 	}
 
-	current, proxies, err := mihomo.GetProxyGroup(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName)
+	if snapshot.subscriptionOp != nil && snapshot.subscriptionOp.State == "running" {
+		status.CurrentProxy = snapshot.cachedCurrentProxy
+		status.AvailableProxies = s.withProxyMetrics(snapshot.cachedAvailableProxy)
+		return status
+	}
+
+	current, proxies, err := mihomo.GetProxyGroupWithTimeout(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName, statusControllerTimeout)
 	if err != nil {
+		if snapshot.cachedCurrentProxy != "" || len(snapshot.cachedAvailableProxy) > 0 {
+			status.CurrentProxy = snapshot.cachedCurrentProxy
+			status.AvailableProxies = s.withProxyMetrics(snapshot.cachedAvailableProxy)
+		}
 		if status.LastError == "" {
 			status.LastError = err.Error()
 		}
 		return status
 	}
+	s.storeProxySnapshot(current, proxies)
 	status.CurrentProxy = current
 	status.AvailableProxies = s.withProxyMetrics(proxies)
 	return status
@@ -859,6 +1014,49 @@ func (s *Service) writeJSON(w http.ResponseWriter, statusCode int, payload any) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func (s *Service) startSubscriptionOperation(kind string, targetURL string, run func() error) (api.StatusResponse, error) {
+	startedAt := nowUTC()
+
+	s.mu.Lock()
+	if s.subscriptionOp != nil && s.subscriptionOp.State == "running" {
+		current := cloneSubscriptionOperation(s.subscriptionOp)
+		s.mu.Unlock()
+		if current != nil && current.Kind != "" {
+			return api.StatusResponse{}, fmt.Errorf("subscription operation already running: %s", current.Kind)
+		}
+		return api.StatusResponse{}, errors.New("subscription operation already running")
+	}
+	s.subscriptionOp = &api.SubscriptionOperation{
+		Kind:      kind,
+		State:     "running",
+		TargetURL: targetURL,
+		StartedAt: &startedAt,
+	}
+	s.mu.Unlock()
+
+	go s.runSubscriptionOperation(kind, targetURL, run)
+	return s.status(), nil
+}
+
+func (s *Service) runSubscriptionOperation(kind string, targetURL string, run func() error) {
+	err := run()
+	finishedAt := nowUTC()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.subscriptionOp == nil || s.subscriptionOp.Kind != kind || s.subscriptionOp.TargetURL != targetURL {
+		return
+	}
+	s.subscriptionOp.FinishedAt = &finishedAt
+	if err != nil {
+		s.subscriptionOp.State = "failed"
+		s.subscriptionOp.Message = err.Error()
+		return
+	}
+	s.subscriptionOp.State = "succeeded"
+	s.subscriptionOp.Message = "done"
 }
 
 func (s *Service) sanitizeExistingConfig() (bool, error) {
@@ -911,8 +1109,9 @@ func (s *Service) waitForManagedProxies() error {
 
 	deadline := time.Now().Add(proxyLoadTimeout)
 	for time.Now().Before(deadline) {
-		_, proxies, err := mihomo.GetProxyGroup(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName)
+		current, proxies, err := mihomo.GetProxyGroup(snapshot.state.ControllerPort, snapshot.state.Secret, proxyGroupName)
 		if err == nil && hasManagedProxies(proxies) {
+			s.storeProxySnapshot(current, proxies)
 			return nil
 		}
 		time.Sleep(300 * time.Millisecond)
@@ -1185,13 +1384,23 @@ func (s *Service) restartManagedRuntime() {
 	}
 }
 
-func (s *Service) storeProxyMetric(name string, latencyMS int, speedBPS int64) {
+func (s *Service) storeProxyMetric(key string, latencyMS int, speedBPS int64) {
+	if strings.TrimSpace(key) == "" {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.proxyMetrics[name] = proxyMetric{
+	s.proxyMetrics[key] = proxyMetric{
 		latencyMS: latencyMS,
 		speedBPS:  speedBPS,
 	}
+}
+
+func (s *Service) storeProxySnapshot(current string, proxies []api.ProxyOption) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cachedCurrentProxy = current
+	s.cachedAvailableProxy = cloneProxyOptions(proxies)
 }
 
 func (s *Service) withProxyMetrics(proxies []api.ProxyOption) []api.ProxyOption {
@@ -1205,7 +1414,7 @@ func (s *Service) withProxyMetrics(proxies []api.ProxyOption) []api.ProxyOption 
 	merged := make([]api.ProxyOption, len(proxies))
 	copy(merged, proxies)
 	for i := range merged {
-		metric, ok := s.proxyMetrics[merged[i].Name]
+		metric, ok := s.proxyMetrics[proxyMetricKey(merged[i])]
 		if !ok {
 			continue
 		}
@@ -1213,6 +1422,31 @@ func (s *Service) withProxyMetrics(proxies []api.ProxyOption) []api.ProxyOption 
 		merged[i].SpeedBPS = metric.speedBPS
 	}
 	return merged
+}
+
+func cloneProxyOptions(proxies []api.ProxyOption) []api.ProxyOption {
+	if len(proxies) == 0 {
+		return nil
+	}
+	cloned := make([]api.ProxyOption, len(proxies))
+	copy(cloned, proxies)
+	return cloned
+}
+
+func cloneSubscriptionOperation(op *api.SubscriptionOperation) *api.SubscriptionOperation {
+	if op == nil {
+		return nil
+	}
+	cloned := *op
+	if op.StartedAt != nil {
+		started := *op.StartedAt
+		cloned.StartedAt = &started
+	}
+	if op.FinishedAt != nil {
+		finished := *op.FinishedAt
+		cloned.FinishedAt = &finished
+	}
+	return &cloned
 }
 
 func toSubscriptionOptions(subscriptions []config.SubscriptionEntry) []api.SubscriptionOption {
@@ -1224,9 +1458,29 @@ func toSubscriptionOptions(subscriptions []config.SubscriptionEntry) []api.Subsc
 		if strings.TrimSpace(subscription.URL) == "" {
 			continue
 		}
-		options = append(options, api.SubscriptionOption{Name: subscription.Name, URL: subscription.URL})
+		options = append(options, api.SubscriptionOption{ID: subscription.ID, Name: subscription.Name, URL: subscription.URL})
 	}
 	return options
+}
+
+func proxyMetricKey(option api.ProxyOption) string {
+	if strings.TrimSpace(option.ID) != "" {
+		return option.ID
+	}
+	return strings.TrimSpace(option.Name)
+}
+
+func proxyMetricKeyForName(options []api.ProxyOption, name string) string {
+	target := strings.TrimSpace(name)
+	if target == "" {
+		return ""
+	}
+	for _, option := range options {
+		if option.Name == target {
+			return proxyMetricKey(option)
+		}
+	}
+	return target
 }
 
 func containsSelectedSubscription(subscriptions []config.SubscriptionEntry, url string) bool {

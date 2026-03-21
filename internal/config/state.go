@@ -2,6 +2,7 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,7 @@ type PersistedState struct {
 }
 
 type SubscriptionEntry struct {
+	ID   string `json:"id,omitempty"`
 	Name string `json:"name,omitempty"`
 	URL  string `json:"url"`
 }
@@ -121,7 +123,7 @@ func (s *PersistedState) normalizeSubscriptions() {
 	}
 
 	if s.SubscriptionURL != "" && !containsSubscription(s.Subscriptions, s.SubscriptionURL) {
-		s.Subscriptions = append([]SubscriptionEntry{{URL: s.SubscriptionURL}}, s.Subscriptions...)
+		s.Subscriptions = append([]SubscriptionEntry{{ID: SubscriptionIDForURL(s.SubscriptionURL), URL: s.SubscriptionURL}}, s.Subscriptions...)
 	}
 
 	if s.SubscriptionURL == "" && len(s.Subscriptions) > 0 {
@@ -133,6 +135,9 @@ func (s *PersistedState) normalizeSubscriptions() {
 	for _, subscription := range s.Subscriptions {
 		if subscription.URL == "" {
 			continue
+		}
+		if subscription.ID == "" {
+			subscription.ID = SubscriptionIDForURL(subscription.URL)
 		}
 		if _, ok := seen[subscription.URL]; ok {
 			continue
@@ -156,7 +161,7 @@ func (s *PersistedState) UpsertSubscription(url string) {
 		return
 	}
 	if !containsSubscription(s.Subscriptions, url) {
-		s.Subscriptions = append(s.Subscriptions, SubscriptionEntry{URL: url})
+		s.Subscriptions = append(s.Subscriptions, SubscriptionEntry{ID: SubscriptionIDForURL(url), URL: url})
 	}
 	s.SubscriptionURL = url
 	s.normalizeSubscriptions()
@@ -216,6 +221,15 @@ func containsSubscription(subscriptions []SubscriptionEntry, url string) bool {
 		}
 	}
 	return false
+}
+
+func SubscriptionIDForURL(rawURL string) string {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return ""
+	}
+	sum := sha1.Sum([]byte(trimmed))
+	return "sub_" + hex.EncodeToString(sum[:8])
 }
 
 func assignSubscriptionNames(subscriptions []SubscriptionEntry) {
