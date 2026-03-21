@@ -429,9 +429,6 @@ func (m model) renderConfigSummary() string {
 	if m.status.LastSyncAt != nil {
 		lines = append(lines, fmt.Sprintf("last sync: %s", m.status.LastSyncAt.Local().Format("2006-01-02 15:04:05")))
 	}
-	if m.status.ShellEnvPath != "" {
-		lines = append(lines, hintStyle.Render(fmt.Sprintf("shell: source %s", m.status.ShellEnvPath)))
-	}
 	if m.status.LastError != "" {
 		lines = append(lines, errorStyle.Render("last error: "+m.status.LastError))
 	}

@@ -2,8 +2,12 @@ package daemon
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
+	"hnet/internal/app"
 	"hnet/internal/config"
 )
 
@@ -72,5 +76,32 @@ func TestRetryRuntimePlanAfterApplyFailureReassignsBusyPorts(t *testing.T) {
 	}
 	if retryPlan.state.ControllerPort == controllerPort {
 		t.Fatalf("expected controller port to change from %d", controllerPort)
+	}
+}
+
+func TestDisableLegacyShellProxyEnvWritesUnsetScript(t *testing.T) {
+	baseDir := t.TempDir()
+	legacyPath := filepath.Join(baseDir, "shell_proxy.sh")
+	if err := os.WriteFile(legacyPath, []byte("export http_proxy=http://127.0.0.1:7890\n"), 0o600); err != nil {
+		t.Fatalf("seed legacy shell proxy file: %v", err)
+	}
+
+	svc := &Service{
+		paths: app.Paths{BaseDir: baseDir},
+	}
+	if err := svc.disableLegacyShellProxyEnv(); err != nil {
+		t.Fatalf("disableLegacyShellProxyEnv() error = %v", err)
+	}
+
+	data, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatalf("read legacy shell proxy file: %v", err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY") {
+		t.Fatalf("expected unset script, got %q", content)
+	}
+	if strings.Contains(content, "export http_proxy") {
+		t.Fatalf("expected legacy exports to be removed, got %q", content)
 	}
 }

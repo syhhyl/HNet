@@ -215,18 +215,16 @@ func TestRenderConfigPageShowsEditorWhenAdding(t *testing.T) {
 	}
 }
 
-func TestRenderConfigPageShowsShellSourceHint(t *testing.T) {
+func TestRenderConfigPageDoesNotShowShellSourceHint(t *testing.T) {
 	m := model{
 		activePage:  pageConfig,
 		configFocus: configFocusSubscriptions,
 		input:       textinput.New(),
-		status: &api.StatusResponse{
-			ShellEnvPath: "/tmp/hnet/shell_proxy.sh",
-		},
+		status:      &api.StatusResponse{},
 	}
 
 	view := m.renderConfigPage()
-	if !strings.Contains(view, "source /tmp/hnet/shell_proxy.sh") {
-		t.Fatalf("expected shell env source hint, got %q", view)
+	if strings.Contains(view, "shell: source") {
+		t.Fatalf("expected shell env source hint to be removed, got %q", view)
 	}
 }

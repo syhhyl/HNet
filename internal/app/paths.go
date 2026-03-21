@@ -17,7 +17,6 @@ type Paths struct {
 	MihomoLogPath    string
 	SubscriptionPath string
 	ProviderPath     string
-	ShellEnvPath     string
 }
 
 func ResolvePaths() (Paths, error) {
@@ -44,7 +43,6 @@ func ResolvePaths() (Paths, error) {
 		MihomoLogPath:    filepath.Join(runtimeDir, "mihomo.log"),
 		SubscriptionPath: filepath.Join(runtimeDir, "subscription.url"),
 		ProviderPath:     filepath.Join(providerDir, "imported.yaml"),
-		ShellEnvPath:     filepath.Join(baseDir, "shell_proxy.sh"),
 	}, nil
 }
 
