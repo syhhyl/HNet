@@ -18,11 +18,11 @@ func ensureRuntimePorts(state config.PersistedState, keepExisting bool) (config.
 		return state, false, nil
 	}
 
-	mixedPort, err := choosePort(defaultMixedPort, state.MixedPort, nil)
+	mixedPort, err := choosePort(defaultMixedPort, nil)
 	if err != nil {
 		return state, false, err
 	}
-	controllerPort, err := choosePort(defaultControllerPort, state.ControllerPort, map[int]struct{}{mixedPort: {}})
+	controllerPort, err := choosePort(defaultControllerPort, map[int]struct{}{mixedPort: {}})
 	if err != nil {
 		return state, false, err
 	}
@@ -33,12 +33,9 @@ func ensureRuntimePorts(state config.PersistedState, keepExisting bool) (config.
 	return state, changed, nil
 }
 
-func choosePort(preferred int, fallback int, excluded map[int]struct{}) (int, error) {
+func choosePort(preferred int, excluded map[int]struct{}) (int, error) {
 	if portUsable(preferred, excluded) {
 		return preferred, nil
-	}
-	if fallback > 0 && fallback != preferred && portUsable(fallback, excluded) {
-		return fallback, nil
 	}
 	return randomPort(excluded)
 }

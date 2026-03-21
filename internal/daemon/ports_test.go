@@ -9,9 +9,8 @@ import (
 
 func TestChoosePortPrefersPreferredPort(t *testing.T) {
 	preferred := freePort(t)
-	fallback := freePort(t)
 
-	port, err := choosePort(preferred, fallback, nil)
+	port, err := choosePort(preferred, nil)
 	if err != nil {
 		t.Fatalf("choosePort() error = %v", err)
 	}
@@ -24,13 +23,12 @@ func TestChoosePortFallsBackWhenPreferredBusy(t *testing.T) {
 	listener, preferred := busyPort(t)
 	defer listener.Close()
 
-	fallback := freePort(t)
-	port, err := choosePort(preferred, fallback, nil)
+	port, err := choosePort(preferred, nil)
 	if err != nil {
 		t.Fatalf("choosePort() error = %v", err)
 	}
-	if port != fallback {
-		t.Fatalf("expected fallback port %d, got %d", fallback, port)
+	if port == preferred {
+		t.Fatalf("expected a replacement port instead of busy preferred port %d", preferred)
 	}
 }
 
@@ -71,10 +69,9 @@ func TestEnsureRuntimePortsFallsBackWhenDefaultMixedPortBusy(t *testing.T) {
 	defer restoreDefaults()
 
 	fallbackMixed := ports[1]
-	fallbackController := ports[2]
 	state := config.PersistedState{
 		MixedPort:      fallbackMixed,
-		ControllerPort: fallbackController,
+		ControllerPort: ports[2],
 	}
 
 	updated, changed, err := ensureRuntimePorts(state, false)
@@ -84,8 +81,8 @@ func TestEnsureRuntimePortsFallsBackWhenDefaultMixedPortBusy(t *testing.T) {
 	if !changed {
 		t.Fatal("expected startup probing to keep a fallback port when the default is busy")
 	}
-	if updated.MixedPort != fallbackMixed {
-		t.Fatalf("expected mixed port fallback %d, got %d", fallbackMixed, updated.MixedPort)
+	if updated.MixedPort == defaultMixed {
+		t.Fatalf("expected mixed port to avoid busy default %d", defaultMixed)
 	}
 	if updated.ControllerPort != defaultController {
 		t.Fatalf("expected controller port default %d, got %d", defaultController, updated.ControllerPort)

@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -77,6 +78,9 @@ func runServe(paths app.Paths) error {
 }
 
 func startDetached(paths app.Paths) error {
+	if err := cleanupStaleDetachedFiles(paths); err != nil {
+		return err
+	}
 	if ok, _ := socketAlive(paths.SocketPath); ok {
 		return errors.New("daemon is already running")
 	}
@@ -161,6 +165,10 @@ func restartDetached(paths app.Paths) error {
 		if err := stopDetached(paths); err != nil {
 			return err
 		}
+	} else {
+		if err := cleanupStaleDetachedFiles(paths); err != nil {
+			return err
+		}
 	}
 
 	return startDetached(paths)
@@ -205,4 +213,44 @@ func readPID(path string) (int, bool) {
 func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil
+}
+
+func cleanupStaleDetachedFiles(paths app.Paths) error {
+	if ok, _ := socketAlive(paths.SocketPath); ok {
+		return nil
+	}
+	if err := removeIfExists(paths.SocketPath); err != nil {
+		return err
+	}
+
+	if pid, ok := readPID(paths.PIDFile); ok && processAlive(pid) {
+		return nil
+	}
+	return removeIfExists(paths.PIDFile)
+}
+
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func commandMatchesExecutable(commandLine string, executable string) bool {
+	commandLine = strings.TrimSpace(commandLine)
+	executable = strings.TrimSpace(executable)
+	if commandLine == "" || executable == "" {
+		return false
+	}
+
+	fields := strings.Fields(commandLine)
+	if len(fields) == 0 {
+		return false
+	}
+
+	command := fields[0]
+	if command == executable {
+		return true
+	}
+	return filepath.Base(command) == filepath.Base(executable)
 }
