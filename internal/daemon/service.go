@@ -337,9 +337,6 @@ func (s *Service) buildRuntimePlanLocked(keepExisting bool, updateSync bool) (ru
 }
 
 func (s *Service) writeManagedConfig(plan runtimePlan) error {
-	if err := fileutil.WriteFileAtomic(s.paths.SubscriptionPath, []byte(plan.state.SubscriptionURL+"\n"), 0o600); err != nil {
-		return err
-	}
 	if err := fileutil.WriteFileAtomic(s.paths.MihomoConfigPath, plan.runtimeConfig, 0o600); err != nil {
 		return err
 	}
@@ -673,7 +670,8 @@ func (s *Service) deleteSubscriptionSync(rawURL string) (api.StatusResponse, boo
 	defer s.runtimeMu.Unlock()
 
 	s.mu.Lock()
-	removed, deletedActive, nextURL := s.state.DeleteSubscription(normalizedURL)
+	wasActive := s.state.SubscriptionURL == normalizedURL
+	removed := s.state.DeleteSubscription(normalizedURL)
 	if !removed {
 		s.mu.Unlock()
 		return api.StatusResponse{}, false, errors.New("subscription not found")
@@ -684,7 +682,7 @@ func (s *Service) deleteSubscriptionSync(rawURL string) (api.StatusResponse, boo
 	}
 	s.proxyMetrics = make(map[string]proxyMetric)
 
-	if !deletedActive {
+	if !wasActive {
 		if err := config.SaveState(s.paths.StatePath, s.state); err != nil {
 			s.mu.Unlock()
 			return api.StatusResponse{}, false, fmt.Errorf("save state: %w", err)
@@ -693,7 +691,7 @@ func (s *Service) deleteSubscriptionSync(rawURL string) (api.StatusResponse, boo
 		return s.status(), false, nil
 	}
 
-	if nextURL == "" {
+	if strings.TrimSpace(s.state.SubscriptionURL) == "" {
 		s.mu.Unlock()
 		if err := s.removeManagedRuntime(); err != nil {
 			return api.StatusResponse{}, true, err
@@ -704,7 +702,7 @@ func (s *Service) deleteSubscriptionSync(rawURL string) (api.StatusResponse, boo
 		return s.status(), true, nil
 	}
 
-	if err := s.clearProviderCacheLocked(nextURL); err != nil {
+	if err := s.clearProviderCacheLocked(s.state.SubscriptionURL); err != nil {
 		s.mu.Unlock()
 		return api.StatusResponse{}, true, err
 	}
@@ -836,7 +834,7 @@ func (s *Service) removeManagedRuntime() error {
 	s.state.LastSyncAt = time.Time{}
 	s.mu.Unlock()
 
-	paths := []string{s.paths.SubscriptionPath, s.paths.MihomoConfigPath}
+	paths := []string{s.paths.MihomoConfigPath}
 	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err

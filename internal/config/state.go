@@ -175,9 +175,9 @@ func (s *PersistedState) SelectSubscription(url string) bool {
 	return true
 }
 
-func (s *PersistedState) DeleteSubscription(url string) (removed bool, deletedActive bool, nextURL string) {
+func (s *PersistedState) DeleteSubscription(url string) bool {
 	if s == nil || url == "" {
-		return false, false, ""
+		return false
 	}
 
 	index := -1
@@ -192,15 +192,15 @@ func (s *PersistedState) DeleteSubscription(url string) (removed bool, deletedAc
 		filtered = append(filtered, subscription)
 	}
 	if index == -1 {
-		return false, false, s.SubscriptionURL
+		return false
 	}
 
-	deletedActive = s.SubscriptionURL == url
+	deletedActive := s.SubscriptionURL == url
 	s.Subscriptions = filtered
 	if len(filtered) == 0 {
 		s.SubscriptionURL = ""
 		s.normalizeSubscriptions()
-		return true, deletedActive, ""
+		return true
 	}
 
 	if deletedActive {
@@ -211,7 +211,7 @@ func (s *PersistedState) DeleteSubscription(url string) (removed bool, deletedAc
 		s.SubscriptionURL = filtered[nextIndex].URL
 	}
 	s.normalizeSubscriptions()
-	return true, deletedActive, s.SubscriptionURL
+	return true
 }
 
 func containsSubscription(subscriptions []SubscriptionEntry, url string) bool {

@@ -15,7 +15,6 @@ type Paths struct {
 	DaemonLogPath    string
 	MihomoConfigPath string
 	MihomoLogPath    string
-	SubscriptionPath string
 	ProviderPath     string
 }
 
@@ -41,7 +40,6 @@ func ResolvePaths() (Paths, error) {
 		DaemonLogPath:    filepath.Join(baseDir, "hnetd.log"),
 		MihomoConfigPath: filepath.Join(runtimeDir, "config.yaml"),
 		MihomoLogPath:    filepath.Join(runtimeDir, "mihomo.log"),
-		SubscriptionPath: filepath.Join(runtimeDir, "subscription.url"),
 		ProviderPath:     filepath.Join(providerDir, "imported.yaml"),
 	}, nil
 }
