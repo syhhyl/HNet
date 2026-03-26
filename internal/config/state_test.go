@@ -73,15 +73,12 @@ func TestPersistedStateDeleteInactiveSubscription(t *testing.T) {
 	}
 	state.normalizeSubscriptions()
 
-	removed, deletedActive, nextURL := state.DeleteSubscription("https://b.example.com/sub")
+	removed := state.DeleteSubscription("https://b.example.com/sub")
 	if !removed {
 		t.Fatal("expected delete to succeed")
 	}
-	if deletedActive {
-		t.Fatal("expected deleted subscription to be inactive")
-	}
-	if nextURL != "https://a.example.com/sub" {
-		t.Fatalf("expected active subscription to stay on a.example.com, got %q", nextURL)
+	if state.SubscriptionURL != "https://a.example.com/sub" {
+		t.Fatalf("expected active subscription to stay on a.example.com, got %q", state.SubscriptionURL)
 	}
 	if len(state.Subscriptions) != 1 {
 		t.Fatalf("expected 1 subscription after delete, got %d", len(state.Subscriptions))
@@ -99,15 +96,12 @@ func TestPersistedStateDeleteActiveSubscriptionSelectsNeighbor(t *testing.T) {
 	}
 	state.normalizeSubscriptions()
 
-	removed, deletedActive, nextURL := state.DeleteSubscription("https://b.example.com/sub")
+	removed := state.DeleteSubscription("https://b.example.com/sub")
 	if !removed {
 		t.Fatal("expected delete to succeed")
 	}
-	if !deletedActive {
-		t.Fatal("expected deleted subscription to be active")
-	}
-	if nextURL != "https://c.example.com/sub" {
-		t.Fatalf("expected next subscription to be c.example.com, got %q", nextURL)
+	if state.SubscriptionURL != "https://c.example.com/sub" {
+		t.Fatalf("expected next subscription to be c.example.com, got %q", state.SubscriptionURL)
 	}
 }
 
@@ -118,12 +112,9 @@ func TestPersistedStateDeleteLastSubscriptionClearsActive(t *testing.T) {
 	}
 	state.normalizeSubscriptions()
 
-	removed, deletedActive, nextURL := state.DeleteSubscription("https://a.example.com/sub")
-	if !removed || !deletedActive {
-		t.Fatalf("expected active subscription to be deleted, got removed=%t deletedActive=%t", removed, deletedActive)
-	}
-	if nextURL != "" {
-		t.Fatalf("expected no next subscription, got %q", nextURL)
+	removed := state.DeleteSubscription("https://a.example.com/sub")
+	if !removed {
+		t.Fatal("expected active subscription to be deleted")
 	}
 	if state.SubscriptionURL != "" {
 		t.Fatalf("expected active subscription to be cleared, got %q", state.SubscriptionURL)
